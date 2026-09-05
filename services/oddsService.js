@@ -18,9 +18,9 @@ const initializeDatabase = async () => {
     } catch (e) { }
 };
 
-// ወደ አድሚን ገፅ (Frontend) Array አድርጎ ለማሳየት እና ለማስተካከል ያገለግላል
 const getApiKey = async () => {
     try {
+        if (process.env.ODDS_API_KEY) return process.env.ODDS_API_KEY.trim();
         const [keys] = await db.query("SELECT setting_value FROM system_settings WHERE setting_key = 'odds_api_key'");
         if (keys.length > 0 && keys[0].setting_value && !keys[0].setting_value.includes('ይቀይሩ')) {
             return keys[0].setting_value.trim();
@@ -29,9 +29,14 @@ const getApiKey = async () => {
     return '';
 };
 
-// 🌟 አዲስ፡ በኮማ (,) የተለዩትን Keys ወደ Array ይቀይረዋል 🌟
 const getApiKeysArray = async () => {
     try {
+        // 🌟 1. መጀመሪያ ከ Render Environment Variable (process.env) ይፈልጋል 🌟
+        if (process.env.ODDS_API_KEY) {
+            return process.env.ODDS_API_KEY.split(',').map(k => k.trim()).filter(k => k.length > 0);
+        }
+
+        // 2. ከሌለ ከዳታቤዝ ይፈልጋል
         const [keys] = await db.query("SELECT setting_value FROM system_settings WHERE setting_key = 'odds_api_key'");
         if (keys.length > 0 && keys[0].setting_value && !keys[0].setting_value.includes('ይቀይሩ')) {
             return keys[0].setting_value.split(',').map(k => k.trim()).filter(k => k.length > 0);
@@ -40,7 +45,6 @@ const getApiKeysArray = async () => {
     return [];
 };
 
-// 🌟 አዲስ፡ ያረጀውን / ያለቀውን API Key ከዳታቤዙ ላይ ሙሉ በሙሉ ይሰርዛል 🌟
 const removeExhaustedKey = async (exhaustedKey) => {
     try {
         let keys = await getApiKeysArray();
@@ -67,15 +71,13 @@ const fetchAndSaveMatches = async () => {
         for (const league of TARGET_LEAGUES) {
             let success = false;
             
-            // 🌟 አዲስ፡ ትክክለኛ እና የሚሰራ Key እስኪያገኝ ድረስ ይሞክራል 🌟
             while (!success) {
                 let apiKeys = await getApiKeysArray();
                 if (apiKeys.length === 0) {
-                    console.error("❌ ምንም የሚሰራ Odds API Key የለም! እባክዎ አድሚን ላይ አዲስ ያስገቡ።");
+                    console.error("❌ ምንም የሚሰራ Odds API Key የለም! እባክዎ Render Environment ላይ ያስገቡ።");
                     return false;
                 }
                 
-                // ሁልጊዜም ከላይ ያለውን (የመጀመሪያውን) ቁልፍ ይጠቀማል
                 let API_KEY = apiKeys[0];
 
                 try {
@@ -170,12 +172,11 @@ const fetchAndSaveMatches = async () => {
                     console.log(`✅ ${league}: ${leagueSavedCount} ጨዋታዎች`);
                     success = true; 
                 } catch (err) {
-                    // 🌟 አዲስ፡ ኮታ ካለቀ (429) ከዳታቤዝ ላይ ይሰርዘውና ድጋሚ (while loop) ይሞክራል 🌟
                     if (err.response && (err.response.status === 429 || err.response.status === 401)) {
                         console.log(`\n⚠️ የ API ኮታ አልቋል ወይንም ተዘግቷል! ወደሚቀጥለው እየተቀየረ ነው...`);
                         await removeExhaustedKey(API_KEY);
                     } else {
-                        success = true; // ሌላ አይነት (Network error) ከሆነ ያሳልፈዋል
+                        success = true; 
                     }
                 }
             }
@@ -281,6 +282,10 @@ const runAutoSettlement = async () => {
 
 const startCronJobs = () => {
     initializeDatabase();
+    
+    // 🌟 2. አዲስ፡ ሰርቨሩ እንደተነሳ ወዲያውኑ ጨዋታዎችን አምጥቶ እንዲያስቀምጥ ትዕዛዝ 🌟
+    fetchAndSaveMatches(); 
+
     cron.schedule('0 */12 * * *', fetchAndSaveMatches); 
     cron.schedule('*/30 * * * *', runAutoSettlement);  
     cron.schedule('0 * * * *', async () => {
