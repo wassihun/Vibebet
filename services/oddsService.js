@@ -31,12 +31,10 @@ const getApiKey = async () => {
 
 const getApiKeysArray = async () => {
     try {
-        // 🌟 1. መጀመሪያ ከ Render Environment Variable (process.env) ይፈልጋል 🌟
         if (process.env.ODDS_API_KEY) {
             return process.env.ODDS_API_KEY.split(',').map(k => k.trim()).filter(k => k.length > 0);
         }
 
-        // 2. ከሌለ ከዳታቤዝ ይፈልጋል
         const [keys] = await db.query("SELECT setting_value FROM system_settings WHERE setting_key = 'odds_api_key'");
         if (keys.length > 0 && keys[0].setting_value && !keys[0].setting_value.includes('ይቀይሩ')) {
             return keys[0].setting_value.split(',').map(k => k.trim()).filter(k => k.length > 0);
@@ -169,13 +167,18 @@ const fetchAndSaveMatches = async () => {
                             }
                         }
                     }
-                    console.log(`✅ ${league}: ${leagueSavedCount} ጨዋታዎች`);
+                    if(leagueSavedCount > 0) {
+                        console.log(`✅ ${league}: ${leagueSavedCount} ጨዋታዎች`);
+                    }
                     success = true; 
                 } catch (err) {
                     if (err.response && (err.response.status === 429 || err.response.status === 401)) {
                         console.log(`\n⚠️ የ API ኮታ አልቋል ወይንም ተዘግቷል! ወደሚቀጥለው እየተቀየረ ነው...`);
                         await removeExhaustedKey(API_KEY);
                     } else {
+                        // 🌟 አዲስ፡ ትክክለኛውን ኤረር በሎግ ላይ እንዲያሳየን ተጨምሯል 🌟
+                        const errorMsg = err.response && err.response.data ? (err.response.data.message || JSON.stringify(err.response.data)) : err.message;
+                        console.log(`⚠️ በ ${league} ላይ ኤረር አጋጥሟል: ${errorMsg}`);
                         success = true; 
                     }
                 }
@@ -270,6 +273,8 @@ const runAutoSettlement = async () => {
                         console.log(`\n⚠️ የ API ኮታ አልቋል ወይንም ተዘግቷል! ወደሚቀጥለው እየተቀየረ ነው...`);
                         await removeExhaustedKey(API_KEY);
                     } else {
+                        const errorMsg = err.response && err.response.data ? (err.response.data.message || JSON.stringify(err.response.data)) : err.message;
+                        console.log(`⚠️ በ ${league} ላይ ውጤት በማጣራት ጊዜ ኤረር አጋጥሟል: ${errorMsg}`);
                         success = true; 
                     }
                 }
@@ -283,7 +288,7 @@ const runAutoSettlement = async () => {
 const startCronJobs = () => {
     initializeDatabase();
     
-    // 🌟 2. አዲስ፡ ሰርቨሩ እንደተነሳ ወዲያውኑ ጨዋታዎችን አምጥቶ እንዲያስቀምጥ ትዕዛዝ 🌟
+    // ሰርቨሩ እንደተነሳ ወዲያውኑ ጨዋታዎችን አምጥቶ እንዲያስቀምጥ
     fetchAndSaveMatches(); 
 
     cron.schedule('0 */12 * * *', fetchAndSaveMatches); 
