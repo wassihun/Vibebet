@@ -29,7 +29,7 @@ const getApiKey = async () => {
     return '';
 };
 
-// 🌟 በኮማ (,) የተለዩትን Keys ወደ Array ይቀይረዋል 🌟
+// 🌟 አዲስ፡ በኮማ (,) የተለዩትን Keys ወደ Array ይቀይረዋል 🌟
 const getApiKeysArray = async () => {
     try {
         const [keys] = await db.query("SELECT setting_value FROM system_settings WHERE setting_key = 'odds_api_key'");
@@ -40,7 +40,7 @@ const getApiKeysArray = async () => {
     return [];
 };
 
-// 🌟 ያረጀውን / ያለቀውን API Key ከዳታቤዙ ላይ ሙሉ በሙሉ ይሰርዛል 🌟
+// 🌟 አዲስ፡ ያረጀውን / ያለቀውን API Key ከዳታቤዙ ላይ ሙሉ በሙሉ ይሰርዛል 🌟
 const removeExhaustedKey = async (exhaustedKey) => {
     try {
         let keys = await getApiKeysArray();
@@ -67,6 +67,7 @@ const fetchAndSaveMatches = async () => {
         for (const league of TARGET_LEAGUES) {
             let success = false;
             
+            // 🌟 አዲስ፡ ትክክለኛ እና የሚሰራ Key እስኪያገኝ ድረስ ይሞክራል 🌟
             while (!success) {
                 let apiKeys = await getApiKeysArray();
                 if (apiKeys.length === 0) {
@@ -166,18 +167,15 @@ const fetchAndSaveMatches = async () => {
                             }
                         }
                     }
-                    if(leagueSavedCount > 0) {
-                        console.log(`✅ ${league}: ${leagueSavedCount} ጨዋታዎች`);
-                    }
+                    console.log(`✅ ${league}: ${leagueSavedCount} ጨዋታዎች`);
                     success = true; 
                 } catch (err) {
+                    // 🌟 አዲስ፡ ኮታ ካለቀ (429) ከዳታቤዝ ላይ ይሰርዘውና ድጋሚ (while loop) ይሞክራል 🌟
                     if (err.response && (err.response.status === 429 || err.response.status === 401)) {
                         console.log(`\n⚠️ የ API ኮታ አልቋል ወይንም ተዘግቷል! ወደሚቀጥለው እየተቀየረ ነው...`);
                         await removeExhaustedKey(API_KEY);
                     } else {
-                        const errorMsg = err.response && err.response.data ? (err.response.data.message || JSON.stringify(err.response.data)) : err.message;
-                        console.log(`⚠️ በ ${league} ላይ ኤረር አጋጥሟል: ${errorMsg}`);
-                        success = true; 
+                        success = true; // ሌላ አይነት (Network error) ከሆነ ያሳልፈዋል
                     }
                 }
             }
@@ -271,8 +269,6 @@ const runAutoSettlement = async () => {
                         console.log(`\n⚠️ የ API ኮታ አልቋል ወይንም ተዘግቷል! ወደሚቀጥለው እየተቀየረ ነው...`);
                         await removeExhaustedKey(API_KEY);
                     } else {
-                        const errorMsg = err.response && err.response.data ? (err.response.data.message || JSON.stringify(err.response.data)) : err.message;
-                        console.log(`⚠️ በ ${league} ላይ ውጤት በማጣራት ጊዜ ኤረር አጋጥሟል: ${errorMsg}`);
                         success = true; 
                     }
                 }
@@ -285,12 +281,8 @@ const runAutoSettlement = async () => {
 
 const startCronJobs = () => {
     initializeDatabase();
-    
-    // 🌟 ሰርቨሩ እንደተነሳ ወዲያውኑ ጨዋታዎችን አምጥቶ እንዲያስቀምጥ
-    fetchAndSaveMatches(); 
-
     cron.schedule('0 */12 * * *', fetchAndSaveMatches); 
-    cron.schedule('*/60 * * * *', runAutoSettlement);  
+    cron.schedule('*/30 * * * *', runAutoSettlement);  
     cron.schedule('0 * * * *', async () => {
         try { await db.query(`UPDATE tickets SET status = 'expired' WHERE status = 'won' AND created_at < NOW() - INTERVAL 48 HOUR`); } catch (e) {}
     });
