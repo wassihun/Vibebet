@@ -18,9 +18,9 @@ const initializeDatabase = async () => {
     } catch (e) { }
 };
 
+// ወደ አድሚን ገፅ (Frontend) Array አድርጎ ለማሳየት እና ለማስተካከል ያገለግላል
 const getApiKey = async () => {
     try {
-        if (process.env.ODDS_API_KEY) return process.env.ODDS_API_KEY.trim();
         const [keys] = await db.query("SELECT setting_value FROM system_settings WHERE setting_key = 'odds_api_key'");
         if (keys.length > 0 && keys[0].setting_value && !keys[0].setting_value.includes('ይቀይሩ')) {
             return keys[0].setting_value.trim();
@@ -29,12 +29,9 @@ const getApiKey = async () => {
     return '';
 };
 
+// 🌟 በኮማ (,) የተለዩትን Keys ወደ Array ይቀይረዋል 🌟
 const getApiKeysArray = async () => {
     try {
-        if (process.env.ODDS_API_KEY) {
-            return process.env.ODDS_API_KEY.split(',').map(k => k.trim()).filter(k => k.length > 0);
-        }
-
         const [keys] = await db.query("SELECT setting_value FROM system_settings WHERE setting_key = 'odds_api_key'");
         if (keys.length > 0 && keys[0].setting_value && !keys[0].setting_value.includes('ይቀይሩ')) {
             return keys[0].setting_value.split(',').map(k => k.trim()).filter(k => k.length > 0);
@@ -43,6 +40,7 @@ const getApiKeysArray = async () => {
     return [];
 };
 
+// 🌟 ያረጀውን / ያለቀውን API Key ከዳታቤዙ ላይ ሙሉ በሙሉ ይሰርዛል 🌟
 const removeExhaustedKey = async (exhaustedKey) => {
     try {
         let keys = await getApiKeysArray();
@@ -72,10 +70,11 @@ const fetchAndSaveMatches = async () => {
             while (!success) {
                 let apiKeys = await getApiKeysArray();
                 if (apiKeys.length === 0) {
-                    console.error("❌ ምንም የሚሰራ Odds API Key የለም! እባክዎ Render Environment ላይ ያስገቡ።");
+                    console.error("❌ ምንም የሚሰራ Odds API Key የለም! እባክዎ አድሚን ላይ አዲስ ያስገቡ።");
                     return false;
                 }
                 
+                // ሁልጊዜም ከላይ ያለውን (የመጀመሪያውን) ቁልፍ ይጠቀማል
                 let API_KEY = apiKeys[0];
 
                 try {
@@ -176,7 +175,6 @@ const fetchAndSaveMatches = async () => {
                         console.log(`\n⚠️ የ API ኮታ አልቋል ወይንም ተዘግቷል! ወደሚቀጥለው እየተቀየረ ነው...`);
                         await removeExhaustedKey(API_KEY);
                     } else {
-                        // 🌟 አዲስ፡ ትክክለኛውን ኤረር በሎግ ላይ እንዲያሳየን ተጨምሯል 🌟
                         const errorMsg = err.response && err.response.data ? (err.response.data.message || JSON.stringify(err.response.data)) : err.message;
                         console.log(`⚠️ በ ${league} ላይ ኤረር አጋጥሟል: ${errorMsg}`);
                         success = true; 
@@ -288,11 +286,11 @@ const runAutoSettlement = async () => {
 const startCronJobs = () => {
     initializeDatabase();
     
-    // ሰርቨሩ እንደተነሳ ወዲያውኑ ጨዋታዎችን አምጥቶ እንዲያስቀምጥ
+    // 🌟 ሰርቨሩ እንደተነሳ ወዲያውኑ ጨዋታዎችን አምጥቶ እንዲያስቀምጥ
     fetchAndSaveMatches(); 
 
     cron.schedule('0 */12 * * *', fetchAndSaveMatches); 
-    cron.schedule('*/30 * * * *', runAutoSettlement);  
+    cron.schedule('*/60 * * * *', runAutoSettlement);  
     cron.schedule('0 * * * *', async () => {
         try { await db.query(`UPDATE tickets SET status = 'expired' WHERE status = 'won' AND created_at < NOW() - INTERVAL 48 HOUR`); } catch (e) {}
     });
