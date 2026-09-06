@@ -6,7 +6,18 @@ require('dotenv').config();
 const app = express();
 
 // 2. ሚድልዌሮች (Middlewares)
-app.use(cors()); // ከፍሮንትኤንድ (React/Next.js) የሚመጣ ጥያቄን ለመቀበል
+// 🌟 አዲስ፡ CORS በትክክል ተስተካክሏል 🌟
+const corsOptions = {
+    origin: [
+        'https://vibebet-frontend.vercel.app', 
+        'https://vibebet.et', 
+        'https://www.vibebet.et',
+        'http://localhost:5173', // ሎካል ላይ ለቴስቲንግ
+        'http://localhost:3000'
+    ],
+    credentials: true // ሎጊን ሲደረግ ቶከን እንዲያሳልፍ
+};
+app.use(cors(corsOptions)); 
 app.use(express.json()); // ዳታን በ JSON ፎርማት ለመለዋወጥ
 
 // 3. የራውት (Routes) ፋይሎችን ማገናኘት
@@ -22,7 +33,6 @@ app.use('/api/fixtures', fixtureRoutes);  // ለጨዋታዎች እና ኦዶች
 app.use('/api/matches', matchSyncRoutes); // ለሲስተም ሴቲንግ እና ዳታ ማዘመኛ
 
 // 🌟 5. ክሮን ጆቦችን ማስነሳት (Background Auto-Tasks) 🌟
-// ይህ ኮድ ሰርቨሩ ሲበራ በየ 6 ሰዓቱ ጨዋታ እንዲያመጣ እና በየ 15 ደቂቃው ውጤት እንዲያጣራ ያደርጋል
 const { startCronJobs } = require('./services/oddsService');
 startCronJobs();
 
