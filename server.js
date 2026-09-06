@@ -6,17 +6,26 @@ require('dotenv').config();
 const app = express();
 
 // 2. ሚድልዌሮች (Middlewares)
-// 🌟 አዲስ፡ CORS በትክክል ተስተካክሏል 🌟
+// 🌟 አዲስ፡ ማንኛውንም የ Vercel ሊንክ (Dynamic URLs) እንዲቀበል ተደርጎ የተሰራ 🌟
 const corsOptions = {
-    origin: [
-        'https://vibebet-frontend.vercel.app', 
-        'https://vibebet.et', 
-        'https://www.vibebet.et',
-        'http://localhost:5173', // ሎካል ላይ ለቴስቲንግ
-        'http://localhost:3000'
-    ],
+    origin: function (origin, callback) {
+        const allowedOrigins = [
+            'https://vibebet.et', 
+            'https://www.vibebet.et',
+            'http://localhost:5173',
+            'http://localhost:3000'
+        ];
+        
+        // ጥያቄው የመጣው ከተፈቀዱት ዶሜኖች ከሆነ፣ ወይንም በ '.vercel.app' የሚያልቅ ከሆነ ይፈቀዳል
+        if (!origin || allowedOrigins.includes(origin) || (origin && origin.endsWith('.vercel.app'))) {
+            callback(null, true);
+        } else {
+            callback(new Error('Not allowed by CORS'));
+        }
+    },
     credentials: true // ሎጊን ሲደረግ ቶከን እንዲያሳልፍ
 };
+
 app.use(cors(corsOptions)); 
 app.use(express.json()); // ዳታን በ JSON ፎርማት ለመለዋወጥ
 
