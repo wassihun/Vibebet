@@ -95,8 +95,43 @@ const registerStaff = async (req, res) => {
     }
 };
 
+// =========================================================================
+// 🌟 አዲሱ ኮድ: የካሸር ሪፖርት ለመክፈት ፓስወርድ ማረጋገጫ (Security Fix) 🌟
+// =========================================================================
+const verifyPassword = async (req, res) => {
+    const { password } = req.body;
+
+    try {
+        // authenticateToken ሚድልዌር የካሸሩን መረጃ ከ Token ያወጣዋል ብለን እናስባለን
+        const userId = req.user.id; 
+
+        // 1. ካሸሩን ከዳታቤዝ ፈልጎ ማምጣት (በዚህ ፋይል ላይ እንዳየሁት ኮለሙ 'password_hash' ይባላል)
+        const [users] = await db.execute('SELECT password_hash FROM users WHERE id = ?', [userId]);
+        
+        if (users.length === 0) {
+            return res.status(404).json({ success: false, message: 'ተጠቃሚው አልተገኘም' });
+        }
+
+        // 2. የተላከውን ፓስወርድ ዳታቤዝ ላይ ካለው (Hashed Password) ጋር ማመሳከር
+        const isMatch = await bcrypt.compare(password, users[0].password_hash);
+        
+        if (!isMatch) {
+            // ፓስወርዱ ከተሳሳተ
+            return res.status(401).json({ success: false, message: 'የተሳሳተ ፓስወርድ ነው!' });
+        }
+
+        // 3. ፓስወርዱ ትክክል ከሆነ (Access Granted)
+        res.json({ success: true, message: 'ትክክለኛ ፓስወርድ' });
+
+    } catch (error) {
+        console.error("Password Verification Error:", error);
+        res.status(500).json({ success: false, message: 'የሰርቨር ስህተት ተፈጥሯል' });
+    }
+};
+
 module.exports = {
     registerUser,
     loginUser,
-    registerStaff
+    registerStaff,
+    verifyPassword // 🌟 አዲሱ ፈንክሽን እዚህ ላይ ተጨምሯል 🌟
 };
