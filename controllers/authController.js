@@ -96,36 +96,50 @@ const registerStaff = async (req, res) => {
 };
 
 // =========================================================================
-// 🌟 አዲሱ ኮድ: የካሸር ሪፖርት ለመክፈት ፓስወርድ ማረጋገጫ (Security Fix) 🌟
+// 🌟 የተሻሻለው የሪፖርት ፓስወርድ ማረጋገጫ (Fail-safe Fix) 🌟
 // =========================================================================
 const verifyPassword = async (req, res) => {
     const { password } = req.body;
 
     try {
-        // authenticateToken ሚድልዌር የካሸሩን መረጃ ከ Token ያወጣዋል ብለን እናስባለን
-        const userId = req.user.id; 
+        let userId = null;
 
-        // 1. ካሸሩን ከዳታቤዝ ፈልጎ ማምጣት (በዚህ ፋይል ላይ እንዳየሁት ኮለሙ 'password_hash' ይባላል)
+        // 1. መጀመሪያ ID ን ከ req.user እንፈልጋለን
+        if (req.user && req.user.id) {
+            userId = req.user.id;
+        } 
+        // 2. ካላገኘነው ደግሞ (የሚድልዌር ችግር ካለ) ቶከኑን ከ Header ላይ ራሳችን እናነባለን
+        else if (req.headers.authorization && req.headers.authorization.startsWith('Bearer ')) {
+            const token = req.headers.authorization.split(' ')[1];
+            const decoded = jwt.verify(token, process.env.JWT_SECRET || 'super_secret_betting_key_2026');
+            userId = decoded.id;
+        }
+
+        // አሁንም ID ካልተገኘ (ቶከን ከሌለ)
+        if (!userId) {
+            return res.status(401).json({ success: false, message: 'ወደ ሲስተሙ አልገቡም (Unauthorized)' });
+        }
+
+        // 3. ካሸሩን ከዳታቤዝ ፈልጎ ማምጣት
         const [users] = await db.execute('SELECT password_hash FROM users WHERE id = ?', [userId]);
         
         if (users.length === 0) {
             return res.status(404).json({ success: false, message: 'ተጠቃሚው አልተገኘም' });
         }
 
-        // 2. የተላከውን ፓስወርድ ዳታቤዝ ላይ ካለው (Hashed Password) ጋር ማመሳከር
+        // 4. የተላከውን የካሸር ፓስወርድ ዳታቤዝ ላይ ካለው ጋር ማመሳከር
         const isMatch = await bcrypt.compare(password, users[0].password_hash);
         
         if (!isMatch) {
-            // ፓስወርዱ ከተሳሳተ
             return res.status(401).json({ success: false, message: 'የተሳሳተ ፓስወርድ ነው!' });
         }
 
-        // 3. ፓስወርዱ ትክክል ከሆነ (Access Granted)
+        // 5. ፓስወርዱ ትክክል ከሆነ ይከፈታል
         res.json({ success: true, message: 'ትክክለኛ ፓስወርድ' });
 
     } catch (error) {
         console.error("Password Verification Error:", error);
-        res.status(500).json({ success: false, message: 'የሰርቨር ስህተት ተፈጥሯል' });
+        res.status(500).json({ success: false, message: 'የተሳሳተ ፓስወርድ ነው ወይም የሰርቨር ስህተት ተፈጥሯል' });
     }
 };
 
@@ -133,5 +147,5 @@ module.exports = {
     registerUser,
     loginUser,
     registerStaff,
-    verifyPassword // 🌟 አዲሱ ፈንክሽን እዚህ ላይ ተጨምሯል 🌟
+    verifyPassword
 };
