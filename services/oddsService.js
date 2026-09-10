@@ -46,38 +46,39 @@ const removeExhaustedKey = async (exhaustedKey) => {
 
 const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
-// 🌟 የዓለምን ሊጎች በሙሉ ማምጣት (ከነ Pagination) 🌟
+// 🌟 የዓለምን ሊጎች እና ሙሉ ማርኬቶችን ማምጣት (Pro Plan Ultimate Fetcher) 🌟
 const fetchAndSaveMatches = async () => {
     try {
-        console.log(`\n⏳ ከ API-Football የዓለምን ሊጎች፣ ሀገራት እና ኦዶች በማምጣት ላይ... (ይህ ትንሽ ደቂቃዎች ሊወስድ ይችላል)`);
+        console.log(`\n⏳ ከ API-Football የዓለም ጨዋታዎችን ከነ-ሙሉ ማርኬታቸው በማምጣት ላይ... (ትንሽ ሊቆይ ይችላል)`);
         let totalSaved = 0;
 
         let apiKeys = await getApiKeysArray();
         if (apiKeys.length === 0) {
-            console.error("❌ ምንም የሚሰራ API-Football Key የለም! እባክዎ አድሚን ላይ አዲስ ያስገቡ።");
+            console.error("❌ ምንም የሚሰራ API-Football Key የለም!");
             return false;
         }
         let API_KEY = apiKeys[0];
         const BASE_URL = 'https://v3.football.api-sports.io';
         const HEADERS = { 'x-apisports-key': API_KEY };
 
-        // የዛሬን እና የቀጣይ 5 ቀናትን ጨዋታዎች እናመጣለን
+        // 1. በቀጣይ 4 ቀናት የሚደረጉ ጨዋታዎችን ቀናት እናዘጋጃለን
         const targetDates = [];
-        for (let i = 0; i < 5; i++) {
+        for (let i = 0; i < 4; i++) {
             const d = new Date();
             d.setDate(d.getDate() + i);
-            targetDates.push(d.toISOString().split('T')[0]); // YYYY-MM-DD
+            targetDates.push(d.toISOString().split('T')[0]); 
         }
 
+        const allFixtures = [];
+        const leaguesMap = new Map();
+
+        // 2. የ 4 ቀናቱን ጨዋታዎች ሰብስበን የትኞቹ ሊጎች አክቲቭ (Active) እንደሆኑ እንለያለን
         for (const dateStr of targetDates) {
             try {
-                console.log(`📅 የ ${dateStr} ጨዋታዎችን በመሰብሰብ ላይ...`);
-                
-                // 1. የዕለቱን ጨዋታዎች በሙሉ እናመጣለን
                 const fixResp = await axios.get(`${BASE_URL}/fixtures`, {
                     headers: HEADERS, params: { date: dateStr }
                 });
-
+                
                 if (fixResp.headers['x-ratelimit-requests-remaining']) {
                     const remaining = fixResp.headers['x-ratelimit-requests-remaining'];
                     const limit = fixResp.headers['x-ratelimit-requests-limit'];
@@ -85,52 +86,70 @@ const fetchAndSaveMatches = async () => {
                     await db.query(`INSERT INTO system_settings (setting_key, setting_value) VALUES ('api_remaining', ?) ON DUPLICATE KEY UPDATE setting_value = ?`, [remaining, remaining]);
                 }
 
-                const fixtures = fixResp.data.response || [];
-                if (fixtures.length === 0) continue;
+                if (fixResp.data.response) {
+                    allFixtures.push(...fixResp.data.response);
+                }
+                await delay(250); 
+            } catch (e) {
+                if (e.response && e.response.status === 429) { await removeExhaustedKey(API_KEY); return false; }
+            }
+        }
 
-                // 🌟 2. ኦዶችን በ Pagination እናመጣለን (ሁሉንም ገፆች እንዲያነብ) 🌟
+        // ጨዋታ ያላቸውን ሊጎች ለይቶ ማውጣት
+        allFixtures.forEach(fix => {
+            const lId = fix.league.id;
+            if (!leaguesMap.has(lId)) {
+                leaguesMap.set(lId, {
+                    id: lId,
+                    season: fix.league.season,
+                    name: fix.league.name || "League",
+                    country: fix.league.country || "World",
+                    flag: fix.league.flag || fix.league.logo || "https://media.api-sports.io/flags/un.svg",
+                    logo: fix.league.logo,
+                    fixtures: []
+                });
+            }
+            leaguesMap.get(lId).fixtures.push(fix);
+        });
+
+        console.log(`📌 ጨዋታ ያላቸው ንቁ ሊጎች ብዛት: ${leaguesMap.size}`);
+
+        // 3. ለእያንዳንዱ ሊግ ሙሉ ማርኬቶችን (All Markets) እንጎትታለን
+        for (const [leagueId, leagueData] of leaguesMap.entries()) {
+            try {
                 const oddsMap = new Map();
                 let page = 1;
                 let totalPages = 1;
 
+                // Pagination (ሁሉንም ገፆች እና ማርኬቶች ያመጣል)
                 while (page <= totalPages) {
                     const oddsResp = await axios.get(`${BASE_URL}/odds`, {
-                        headers: HEADERS, params: { date: dateStr, bookmaker: 8, page: page }
+                        headers: HEADERS, params: { league: leagueId, season: leagueData.season, bookmaker: 8, page: page }
                     });
 
                     if (oddsResp.data.response) {
                         oddsResp.data.response.forEach(odd => {
-                            if (odd.bookmakers && odd.bookmakers.length > 0) {
-                                oddsMap.set(odd.fixture.id, odd.bookmakers[0]);
-                            }
+                            if (odd.bookmakers && odd.bookmakers.length > 0) oddsMap.set(odd.fixture.id, odd.bookmakers[0]);
                         });
                     }
-
                     totalPages = oddsResp.data.paging?.total || 1;
                     page++;
-                    await delay(350); // Rate limit መከላከያ
+                    await delay(300); // Rate limit መከላከያ
                 }
 
-                let dailySaved = 0;
+                let leagueSavedCount = 0;
+                const sportKey = `${leagueData.country}|${leagueData.name}|${leagueData.flag}`;
 
-                // 3. ዳታውን አስተካክለን ወደ ዳታቤዝ ማስገባት
-                for (const fix of fixtures) {
+                for (const fix of leagueData.fixtures) {
                     const bookmakerData = oddsMap.get(fix.fixture.id);
                     if (!bookmakerData || !bookmakerData.bets) continue;
 
                     const homeTeam = fix.teams.home.name;
                     const awayTeam = fix.teams.away.name;
                     
-                    // ሀገር፣ ሊግ እና ኦርጅናል ባንዲራ ፎርማት (Country|League|Flag)
-                    const countryName = fix.league.country || "World";
-                    const leagueName = fix.league.name || "Unknown League";
-                    const countryFlag = fix.league.flag || fix.league.logo || "https://media.api-sports.io/flags/un.svg"; 
-                    
-                    const sportKey = `${countryName}|${leagueName}|${countryFlag}`;
-                    
-                    const finalBookmakers = [{ title: bookmakerData.name || "API-Football Bookmaker", markets: [] }];
+                    const finalBookmakers = [{ title: bookmakerData.name || "API-Football", markets: [] }];
 
-                    // ሁሉንም ማርኬቶች ማካተት
+                    // 🌟 በመቶዎች የሚቆጠሩትን ማርኬቶች በሙሉ አቅፎ ይይዛል 🌟
                     for (const bet of bookmakerData.bets) {
                         let marketKey = `market_${bet.id}`;
                         if (bet.id === 1) marketKey = 'h2h';
@@ -157,7 +176,7 @@ const fetchAndSaveMatches = async () => {
                         const matchStatus = fix.fixture.status.short;
                         const homeLogo = fix.teams.home.logo;
                         const awayLogo = fix.teams.away.logo;
-                        const leagueLogo = fix.league.logo;
+                        const leagueLogo = leagueData.flag; 
 
                         await db.query(`
                             INSERT INTO saved_matches 
@@ -171,25 +190,22 @@ const fetchAndSaveMatches = async () => {
                             oddsDataStr, matchDate, matchStatus, homeLogo, awayLogo, leagueLogo
                         ]);
                         
-                        dailySaved++; totalSaved++;
+                        leagueSavedCount++; totalSaved++;
                     }
                 }
-                console.log(`✅ ለቀን ${dateStr}: ${dailySaved} ጨዋታዎች በስኬት ተቀምጠዋል`);
+                if (leagueSavedCount > 0) console.log(`✅ [${leagueData.country}] ${leagueData.name}: ${leagueSavedCount} ጨዋታዎች በስኬት ተቀምጠዋል`);
             } catch (err) {
-                if (err.response && (err.response.status === 429 || err.response.status === 403 || err.response.status === 401)) {
-                    console.log(`\n⚠️ የ API ኮታ አልቋል ወይንም ተዘግቷል! አዲስ Key ያዘጋጁ...`);
-                    await removeExhaustedKey(API_KEY);
-                    return false; 
+                if (err.response && (err.response.status === 429 || err.response.status === 403)) {
+                    await removeExhaustedKey(API_KEY); return false; 
                 }
             }
         }
-        console.log(`🎉 በአጠቃላይ ${totalSaved} የዓለም ጨዋታዎች ከነሙሉ ማርኬታቸው ተጭነዋል!`);
+        console.log(`🎉 በአጠቃላይ ${totalSaved} የዓለም ጨዋታዎች ከነ-ሙሉ ማርኬታቸው ተጭነዋል!`);
         return true;
     } catch (error) { console.error("Fetch error:", error); return false; }
 };
 
 const runAutoSettlement = async () => {
-    // እንደነበረው ይቆያል (ምንም አልተቀየረም)
     console.log("🔄 አውቶማቲክ የ API-Football ውጤት ማጣራት ተጀመረ...");
     try {
         const [pendingItems] = await db.query(`SELECT id, fixture_id, odd_name FROM ticket_items WHERE match_status = 'pending'`);
@@ -238,8 +254,8 @@ const runAutoSettlement = async () => {
                             else if (opt === 'X2') isWon = (homeGoals <= awayGoals);
                             else if (opt.includes('Over 2.5')) isWon = (totalGoals > 2.5);
                             else if (opt.includes('Under 2.5')) isWon = (totalGoals < 2.5);
-                            else if (opt === 'Yes') isWon = (homeGoals > 0 && awayGoals > 0); 
-                            else if (opt === 'No') isWon = (homeGoals === 0 || awayGoals === 0);
+                            else if (opt === 'Yes' || opt.includes('GG')) isWon = (homeGoals > 0 && awayGoals > 0); 
+                            else if (opt === 'No' || opt.includes('NG')) isWon = (homeGoals === 0 || awayGoals === 0);
 
                             await db.query("UPDATE ticket_items SET match_status = ?, score = ? WHERE id = ?", [isWon ? 'won' : 'lost', scoreStr, pick.id]);
                         }
