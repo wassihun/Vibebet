@@ -61,9 +61,9 @@ const fetchAndSaveMatches = async () => {
         const BASE_URL = 'https://v3.football.api-sports.io';
         const HEADERS = { 'x-apisports-key': API_KEY };
 
-        // 🌟 የ 7 ቀናት ጨዋታዎችን እንሰበስባለን (ለከፍተኛ መጠን / High Volume) 🌟
+        // 🌟 የ 14 ቀናት (የሁለት ሳምንት) ጨዋታዎችን እንሰበስባለን 🌟
         const targetDates = [];
-        for (let i = 0; i < 7; i++) {
+        for (let i = 0; i < 14; i++) {
             const d = new Date();
             d.setDate(d.getDate() + i);
             targetDates.push(d.toISOString().split('T')[0]);
