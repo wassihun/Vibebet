@@ -44,10 +44,12 @@ const removeExhaustedKey = async (exhaustedKey) => {
     } catch (e) {}
 };
 
-// 🌟 የዓለምን ሊጎች በሙሉ ቀናትን (Dates) በመጠቀም በአንድ ጊዜ ማምጣት (Pro Plan Optimized) 🌟
+const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+// 🌟 የዓለምን ሊጎች በሙሉ ማምጣት (ከነ Pagination) 🌟
 const fetchAndSaveMatches = async () => {
     try {
-        console.log(`\n⏳ ከ API-Football የዓለምን ሊጎች፣ ሀገራት እና ኦዶች በማምጣት ላይ...`);
+        console.log(`\n⏳ ከ API-Football የዓለምን ሊጎች፣ ሀገራት እና ኦዶች በማምጣት ላይ... (ይህ ትንሽ ደቂቃዎች ሊወስድ ይችላል)`);
         let totalSaved = 0;
 
         let apiKeys = await getApiKeysArray();
@@ -59,17 +61,19 @@ const fetchAndSaveMatches = async () => {
         const BASE_URL = 'https://v3.football.api-sports.io';
         const HEADERS = { 'x-apisports-key': API_KEY };
 
-        // የዛሬን፣ የነገን እና የነገ ወዲያን ቀናት እናዘጋጃለን (Next 3 Days)
+        // የዛሬን እና የቀጣይ 5 ቀናትን ጨዋታዎች እናመጣለን
         const targetDates = [];
-        for (let i = 0; i < 3; i++) {
+        for (let i = 0; i < 5; i++) {
             const d = new Date();
             d.setDate(d.getDate() + i);
-            targetDates.push(d.toISOString().split('T')[0]); // ፎርማት: YYYY-MM-DD
+            targetDates.push(d.toISOString().split('T')[0]); // YYYY-MM-DD
         }
 
         for (const dateStr of targetDates) {
             try {
-                // 1. በዚህ ቀን የሚደረጉትን የዓለም ጨዋታዎች በሙሉ በአንድ ጊዜ እናመጣለን
+                console.log(`📅 የ ${dateStr} ጨዋታዎችን በመሰብሰብ ላይ...`);
+                
+                // 1. የዕለቱን ጨዋታዎች በሙሉ እናመጣለን
                 const fixResp = await axios.get(`${BASE_URL}/fixtures`, {
                     headers: HEADERS, params: { date: dateStr }
                 });
@@ -84,18 +88,27 @@ const fetchAndSaveMatches = async () => {
                 const fixtures = fixResp.data.response || [];
                 if (fixtures.length === 0) continue;
 
-                // 2. በዚህ ቀን ያሉትን ሁሉንም ኦዶች በአንድ ጊዜ እናመጣለን (Bookmaker 8 = Bet365)
-                const oddsResp = await axios.get(`${BASE_URL}/odds`, {
-                    headers: HEADERS, params: { date: dateStr, bookmaker: 8 }
-                });
-
+                // 🌟 2. ኦዶችን በ Pagination እናመጣለን (ሁሉንም ገፆች እንዲያነብ) 🌟
                 const oddsMap = new Map();
-                if (oddsResp.data.response) {
-                    oddsResp.data.response.forEach(odd => {
-                        if (odd.bookmakers && odd.bookmakers.length > 0) {
-                            oddsMap.set(odd.fixture.id, odd.bookmakers[0]);
-                        }
+                let page = 1;
+                let totalPages = 1;
+
+                while (page <= totalPages) {
+                    const oddsResp = await axios.get(`${BASE_URL}/odds`, {
+                        headers: HEADERS, params: { date: dateStr, bookmaker: 8, page: page }
                     });
+
+                    if (oddsResp.data.response) {
+                        oddsResp.data.response.forEach(odd => {
+                            if (odd.bookmakers && odd.bookmakers.length > 0) {
+                                oddsMap.set(odd.fixture.id, odd.bookmakers[0]);
+                            }
+                        });
+                    }
+
+                    totalPages = oddsResp.data.paging?.total || 1;
+                    page++;
+                    await delay(350); // Rate limit መከላከያ
                 }
 
                 let dailySaved = 0;
@@ -108,10 +121,10 @@ const fetchAndSaveMatches = async () => {
                     const homeTeam = fix.teams.home.name;
                     const awayTeam = fix.teams.away.name;
                     
-                    // 🌟 እጅግ ትክክለኛ የሀገር ስም፣ ሊግ እና ኦርጅናል ባንዲራ ፎርማት 🌟
+                    // ሀገር፣ ሊግ እና ኦርጅናል ባንዲራ ፎርማት (Country|League|Flag)
                     const countryName = fix.league.country || "World";
                     const leagueName = fix.league.name || "Unknown League";
-                    const countryFlag = fix.league.flag || "https://media.api-sports.io/flags/un.svg"; // Default Flag
+                    const countryFlag = fix.league.flag || fix.league.logo || "https://media.api-sports.io/flags/un.svg"; 
                     
                     const sportKey = `${countryName}|${leagueName}|${countryFlag}`;
                     
@@ -176,6 +189,7 @@ const fetchAndSaveMatches = async () => {
 };
 
 const runAutoSettlement = async () => {
+    // እንደነበረው ይቆያል (ምንም አልተቀየረም)
     console.log("🔄 አውቶማቲክ የ API-Football ውጤት ማጣራት ተጀመረ...");
     try {
         const [pendingItems] = await db.query(`SELECT id, fixture_id, odd_name FROM ticket_items WHERE match_status = 'pending'`);
