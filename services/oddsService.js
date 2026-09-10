@@ -12,7 +12,7 @@ const initializeDatabase = async () => {
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
         `);
         await db.query(`INSERT IGNORE INTO system_settings (setting_key, setting_value) VALUES ('api_football_key', '')`);
-    } catch (e) { }
+    } catch (e) { console.error("Database Init Error:", e); }
 };
 
 const getApiKey = async () => {
@@ -78,9 +78,11 @@ const fetchAndSaveMatches = async () => {
                 });
 
                 if (fixResp.headers['x-ratelimit-requests-remaining']) {
-                    const remaining = fixResp.headers['x-ratelimit-requests-remaining'];
-                    const limit = fixResp.headers['x-ratelimit-requests-limit'];
-                    await db.query(`INSERT INTO system_settings (setting_key, setting_value) VALUES ('api_used', ?) ON DUPLICATE KEY UPDATE setting_value = ?`, [limit - remaining, limit - remaining]);
+                    const remaining = parseInt(fixResp.headers['x-ratelimit-requests-remaining'], 10);
+                    const limit = parseInt(fixResp.headers['x-ratelimit-requests-limit'], 10);
+                    const used = limit - remaining;
+                    
+                    await db.query(`INSERT INTO system_settings (setting_key, setting_value) VALUES ('api_used', ?) ON DUPLICATE KEY UPDATE setting_value = ?`, [used, used]);
                     await db.query(`INSERT INTO system_settings (setting_key, setting_value) VALUES ('api_remaining', ?) ON DUPLICATE KEY UPDATE setting_value = ?`, [remaining, remaining]);
                 }
 
@@ -100,7 +102,7 @@ const fetchAndSaveMatches = async () => {
                     if (oddsResp.data.response) {
                         oddsResp.data.response.forEach(odd => {
                             if (odd.bookmakers && odd.bookmakers.length > 0) {
-                                // 🌟 ሚስጥሩ እዚህ ጋር ነው፡ በጣም ብዙ ማርኬት ያለውን ቡክሜከር ለይቶ መውሰድ (Max Markets) 🌟
+                                // በጣም ብዙ ማርኬት ያለውን ቡክሜከር ለይቶ መውሰድ (Max Markets)
                                 const bestBookmaker = odd.bookmakers.sort((a, b) => b.bets.length - a.bets.length)[0];
                                 oddsMap.set(odd.fixture.id, bestBookmaker);
                             }
@@ -118,19 +120,21 @@ const fetchAndSaveMatches = async () => {
                     const bookmakerData = oddsMap.get(fix.fixture.id);
                     if (!bookmakerData || !bookmakerData.bets) continue;
 
-                    const homeTeam = fix.teams.home.name;
-                    const awayTeam = fix.teams.away.name;
+                    // Null checking for teams 
+                    const homeTeam = fix.teams?.home?.name || "Home Team";
+                    const awayTeam = fix.teams?.away?.name || "Away Team";
                     
-                    const countryName = fix.league.country || "World";
-                    const leagueName = fix.league.name || "League";
-                    const countryFlag = fix.league.flag || fix.league.logo || "https://media.api-sports.io/flags/un.svg"; 
+                    const countryName = fix.league?.country || "World";
+                    const leagueName = fix.league?.name || "League";
+                    const countryFlag = fix.league?.flag || fix.league?.logo || "https://media.api-sports.io/flags/un.svg"; 
                     
                     const sportKey = `${countryName}|${leagueName}|${countryFlag}`;
                     
                     const finalBookmakers = [{ title: bookmakerData.name || "API-Football Bookmaker", markets: [] }];
 
-                    // ሁሉንም ማርኬቶች ያለምንም መቆራረጥ እናስገባለን
                     for (const bet of bookmakerData.bets) {
+                        if (!bet.values) continue; // Safety check
+                        
                         let marketKey = `market_${bet.id}`;
                         if (bet.id === 1) marketKey = 'h2h';
                         else if (bet.id === 12) marketKey = 'double_chance';
@@ -154,9 +158,9 @@ const fetchAndSaveMatches = async () => {
                         const oddsDataStr = JSON.stringify(finalBookmakers);
                         const matchDate = new Date(fix.fixture.date);
                         const matchStatus = fix.fixture.status.short;
-                        const homeLogo = fix.teams.home.logo;
-                        const awayLogo = fix.teams.away.logo;
-                        const leagueLogo = fix.league.logo;
+                        const homeLogo = fix.teams?.home?.logo || "";
+                        const awayLogo = fix.teams?.away?.logo || "";
+                        const leagueLogo = fix.league?.logo || "";
 
                         await db.query(`
                             INSERT INTO saved_matches 
@@ -217,20 +221,27 @@ const runAutoSettlement = async () => {
                     await db.query(`UPDATE saved_matches SET match_status = ? WHERE id = ?`, [status, match.fixture.id.toString()]);
 
                     if (isCompleted) {
-                        const homeGoals = match.goals.home || 0;
-                        const awayGoals = match.goals.away || 0;
+                        // 🌟 ማረጋገጫ በ 90 ደቂቃ ውጤት እንዲሆን የተደረገ ማስተካከያ (Full-Time Score for Betting) 🌟
+                        const ftHome = match.score?.fulltime?.home;
+                        const ftAway = match.score?.fulltime?.away;
+                        
+                        const homeGoals = ftHome !== null && ftHome !== undefined ? ftHome : (match.goals?.home || 0);
+                        const awayGoals = ftAway !== null && ftAway !== undefined ? ftAway : (match.goals?.away || 0);
+                        
                         const totalGoals = homeGoals + awayGoals;
                         const scoreStr = `${homeGoals}-${awayGoals}`; 
 
                         const associatedPicks = pendingItems.filter(p => p.fixture_id == match.fixture.id);
+                        const homeName = match.teams?.home?.name || "Home";
+                        const awayName = match.teams?.away?.name || "Away";
                         
                         for (let pick of associatedPicks) {
                             let isWon = false;
                             const opt = pick.odd_name.toString().trim();
 
-                            if (opt === '1' || opt === match.teams.home.name) isWon = (homeGoals > awayGoals);
+                            if (opt === '1' || opt === homeName) isWon = (homeGoals > awayGoals);
                             else if (opt === 'X' || opt === 'Draw') isWon = (homeGoals === awayGoals);
-                            else if (opt === '2' || opt === match.teams.away.name) isWon = (homeGoals < awayGoals);
+                            else if (opt === '2' || opt === awayName) isWon = (homeGoals < awayGoals);
                             else if (opt === '1X') isWon = (homeGoals >= awayGoals);
                             else if (opt === '12') isWon = (homeGoals !== awayGoals);
                             else if (opt === 'X2') isWon = (homeGoals <= awayGoals);
@@ -253,7 +264,7 @@ const runAutoSettlement = async () => {
         await db.query(`UPDATE tickets t SET status = 'lost' WHERE status = 'active' AND EXISTS (SELECT 1 FROM ticket_items ti WHERE ti.ticket_id = t.id AND ti.match_status = 'lost')`);
         await db.query(`UPDATE tickets t SET status = 'won' WHERE status = 'active' AND NOT EXISTS (SELECT 1 FROM ticket_items ti WHERE ti.ticket_id = t.id AND ti.match_status != 'won')`);
         
-    } catch (error) { }
+    } catch (error) { console.error("Auto Settlement Error:", error); }
 };
 
 const startCronJobs = () => {
