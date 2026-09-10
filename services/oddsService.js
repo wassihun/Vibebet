@@ -46,10 +46,10 @@ const removeExhaustedKey = async (exhaustedKey) => {
 
 const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
-// 🌟 የዓለምን ሊጎች እና ሙሉ ማርኬቶችን ማምጣት (Pro Plan Ultimate Fetcher) 🌟
+// 🌟 በ ሺዎች የሚቆጠሩ የዓለም ጨዋታዎችን ከነ-ሙሉ ማርኬታቸው ማምጣት 🌟
 const fetchAndSaveMatches = async () => {
     try {
-        console.log(`\n⏳ ከ API-Football የዓለም ጨዋታዎችን ከነ-ሙሉ ማርኬታቸው በማምጣት ላይ... (ትንሽ ሊቆይ ይችላል)`);
+        console.log(`\n⏳ ከ API-Football የዓለምን ሊጎች፣ ሀገራት እና ኦዶች በማምጣት ላይ... (ትንሽ ሊቆይ ይችላል)`);
         let totalSaved = 0;
 
         let apiKeys = await getApiKeysArray();
@@ -61,24 +61,22 @@ const fetchAndSaveMatches = async () => {
         const BASE_URL = 'https://v3.football.api-sports.io';
         const HEADERS = { 'x-apisports-key': API_KEY };
 
-        // 1. በቀጣይ 4 ቀናት የሚደረጉ ጨዋታዎችን ቀናት እናዘጋጃለን
+        // 🌟 የ 7 ቀናት ጨዋታዎችን እንሰበስባለን (ለከፍተኛ መጠን / High Volume) 🌟
         const targetDates = [];
-        for (let i = 0; i < 4; i++) {
+        for (let i = 0; i < 7; i++) {
             const d = new Date();
             d.setDate(d.getDate() + i);
-            targetDates.push(d.toISOString().split('T')[0]); 
+            targetDates.push(d.toISOString().split('T')[0]);
         }
 
-        const allFixtures = [];
-        const leaguesMap = new Map();
-
-        // 2. የ 4 ቀናቱን ጨዋታዎች ሰብስበን የትኞቹ ሊጎች አክቲቭ (Active) እንደሆኑ እንለያለን
         for (const dateStr of targetDates) {
             try {
+                console.log(`📅 የ ${dateStr} ጨዋታዎችን በመሰብሰብ ላይ...`);
+                
                 const fixResp = await axios.get(`${BASE_URL}/fixtures`, {
                     headers: HEADERS, params: { date: dateStr }
                 });
-                
+
                 if (fixResp.headers['x-ratelimit-requests-remaining']) {
                     const remaining = fixResp.headers['x-ratelimit-requests-remaining'];
                     const limit = fixResp.headers['x-ratelimit-requests-limit'];
@@ -86,70 +84,52 @@ const fetchAndSaveMatches = async () => {
                     await db.query(`INSERT INTO system_settings (setting_key, setting_value) VALUES ('api_remaining', ?) ON DUPLICATE KEY UPDATE setting_value = ?`, [remaining, remaining]);
                 }
 
-                if (fixResp.data.response) {
-                    allFixtures.push(...fixResp.data.response);
-                }
-                await delay(250); 
-            } catch (e) {
-                if (e.response && e.response.status === 429) { await removeExhaustedKey(API_KEY); return false; }
-            }
-        }
+                const fixtures = fixResp.data.response || [];
+                if (fixtures.length === 0) continue;
 
-        // ጨዋታ ያላቸውን ሊጎች ለይቶ ማውጣት
-        allFixtures.forEach(fix => {
-            const lId = fix.league.id;
-            if (!leaguesMap.has(lId)) {
-                leaguesMap.set(lId, {
-                    id: lId,
-                    season: fix.league.season,
-                    name: fix.league.name || "League",
-                    country: fix.league.country || "World",
-                    flag: fix.league.flag || fix.league.logo || "https://media.api-sports.io/flags/un.svg",
-                    logo: fix.league.logo,
-                    fixtures: []
-                });
-            }
-            leaguesMap.get(lId).fixtures.push(fix);
-        });
-
-        console.log(`📌 ጨዋታ ያላቸው ንቁ ሊጎች ብዛት: ${leaguesMap.size}`);
-
-        // 3. ለእያንዳንዱ ሊግ ሙሉ ማርኬቶችን (All Markets) እንጎትታለን
-        for (const [leagueId, leagueData] of leaguesMap.entries()) {
-            try {
                 const oddsMap = new Map();
                 let page = 1;
                 let totalPages = 1;
 
-                // Pagination (ሁሉንም ገፆች እና ማርኬቶች ያመጣል)
+                // 🌟 ቡክሜከር ሳንገድብ (Bookmaker Parameter ሳንሰጥ) ሁሉንም ኦድ እናመጣለን 🌟
                 while (page <= totalPages) {
                     const oddsResp = await axios.get(`${BASE_URL}/odds`, {
-                        headers: HEADERS, params: { league: leagueId, season: leagueData.season, bookmaker: 8, page: page }
+                        headers: HEADERS, params: { date: dateStr, page: page }
                     });
 
                     if (oddsResp.data.response) {
                         oddsResp.data.response.forEach(odd => {
-                            if (odd.bookmakers && odd.bookmakers.length > 0) oddsMap.set(odd.fixture.id, odd.bookmakers[0]);
+                            if (odd.bookmakers && odd.bookmakers.length > 0) {
+                                // 🌟 ሚስጥሩ እዚህ ጋር ነው፡ በጣም ብዙ ማርኬት ያለውን ቡክሜከር ለይቶ መውሰድ (Max Markets) 🌟
+                                const bestBookmaker = odd.bookmakers.sort((a, b) => b.bets.length - a.bets.length)[0];
+                                oddsMap.set(odd.fixture.id, bestBookmaker);
+                            }
                         });
                     }
+
                     totalPages = oddsResp.data.paging?.total || 1;
                     page++;
-                    await delay(300); // Rate limit መከላከያ
+                    await delay(350); 
                 }
 
-                let leagueSavedCount = 0;
-                const sportKey = `${leagueData.country}|${leagueData.name}|${leagueData.flag}`;
+                let dailySaved = 0;
 
-                for (const fix of leagueData.fixtures) {
+                for (const fix of fixtures) {
                     const bookmakerData = oddsMap.get(fix.fixture.id);
                     if (!bookmakerData || !bookmakerData.bets) continue;
 
                     const homeTeam = fix.teams.home.name;
                     const awayTeam = fix.teams.away.name;
                     
-                    const finalBookmakers = [{ title: bookmakerData.name || "API-Football", markets: [] }];
+                    const countryName = fix.league.country || "World";
+                    const leagueName = fix.league.name || "League";
+                    const countryFlag = fix.league.flag || fix.league.logo || "https://media.api-sports.io/flags/un.svg"; 
+                    
+                    const sportKey = `${countryName}|${leagueName}|${countryFlag}`;
+                    
+                    const finalBookmakers = [{ title: bookmakerData.name || "API-Football Bookmaker", markets: [] }];
 
-                    // 🌟 በመቶዎች የሚቆጠሩትን ማርኬቶች በሙሉ አቅፎ ይይዛል 🌟
+                    // ሁሉንም ማርኬቶች ያለምንም መቆራረጥ እናስገባለን
                     for (const bet of bookmakerData.bets) {
                         let marketKey = `market_${bet.id}`;
                         if (bet.id === 1) marketKey = 'h2h';
@@ -176,7 +156,7 @@ const fetchAndSaveMatches = async () => {
                         const matchStatus = fix.fixture.status.short;
                         const homeLogo = fix.teams.home.logo;
                         const awayLogo = fix.teams.away.logo;
-                        const leagueLogo = leagueData.flag; 
+                        const leagueLogo = fix.league.logo;
 
                         await db.query(`
                             INSERT INTO saved_matches 
@@ -190,17 +170,19 @@ const fetchAndSaveMatches = async () => {
                             oddsDataStr, matchDate, matchStatus, homeLogo, awayLogo, leagueLogo
                         ]);
                         
-                        leagueSavedCount++; totalSaved++;
+                        dailySaved++; totalSaved++;
                     }
                 }
-                if (leagueSavedCount > 0) console.log(`✅ [${leagueData.country}] ${leagueData.name}: ${leagueSavedCount} ጨዋታዎች በስኬት ተቀምጠዋል`);
+                console.log(`✅ ለቀን ${dateStr}: ${dailySaved} ጨዋታዎች ተቀምጠዋል`);
             } catch (err) {
-                if (err.response && (err.response.status === 429 || err.response.status === 403)) {
-                    await removeExhaustedKey(API_KEY); return false; 
+                if (err.response && (err.response.status === 429 || err.response.status === 403 || err.response.status === 401)) {
+                    console.log(`\n⚠️ የ API ኮታ አልቋል ወይንም ተዘግቷል!`);
+                    await removeExhaustedKey(API_KEY);
+                    return false; 
                 }
             }
         }
-        console.log(`🎉 በአጠቃላይ ${totalSaved} የዓለም ጨዋታዎች ከነ-ሙሉ ማርኬታቸው ተጭነዋል!`);
+        console.log(`🎉 በአጠቃላይ ${totalSaved} የዓለም ጨዋታዎች ከነሙሉ ማርኬታቸው ተጭነዋል!`);
         return true;
     } catch (error) { console.error("Fetch error:", error); return false; }
 };
