@@ -21,7 +21,7 @@
     "html-to-image": "^1.11.13",
     "jsbarcode": "^3.12.3",
     "jsonwebtoken": "^9.0.3",
-    "mysql2": "^3.24.2",
+    "mysql2": "^3.24.4",
     "node-cron": "^4.6.0",
     "qrcode.react": "^4.2.0",
     "qz-tray": "^2.2.6"
