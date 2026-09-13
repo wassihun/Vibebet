@@ -1,20 +1,14 @@
-const mysql = require('mysql2'); // ይህ መስመር መኖር አለበት!
+const mysql = require('mysql2/promise'); //  '/promise' መጨመሩን አረጋግጥ
 
-const db = mysql.createConnection({
+const pool = mysql.createPool({
     host: process.env.DB_HOST || 'localhost',
     user: process.env.DB_USER || 'root',
     password: process.env.DB_PASSWORD || '',
     database: process.env.DB_NAME || 'vibebet',
-    port: process.env.DB_PORT || 3306
+    port: process.env.DB_PORT || 3306,
+    waitForConnections: true,
+    connectionLimit: 10,
+    queueLimit: 0
 });
 
-// ዳታቤዝ ማገናኘቱን ማረጋገጫ (ከተቻለ)
-db.connect((err) => {
-    if (err) {
-        console.error('Database connection failed:', err.stack);
-        return;
-    }
-    console.log('Connected to MySQL database as id ' + db.threadId);
-});
-
-module.exports = db;
+module.exports = pool;
