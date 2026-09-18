@@ -17,4 +17,15 @@ router.post('/register-staff', verifyToken, isAdmin, authController.registerStaf
 // =========================================================================
 router.post('/verify-password', verifyToken, authController.verifyPassword);
 
+// =========================================================================
+// 🛡️ አዲስ የተጨመረ: የቶከን ትክክለኛነት ማረጋገጫ (ለ Frontend Auto-Logout ጠቃሚ ነው) 🌟
+// =========================================================================
+router.get('/verify', verifyToken, (req, res) => {
+    // ሚድልዌሩ (verifyToken) ቶከኑ ትክክል መሆኑን ካረጋገጠ በኋላ ወደዚህ ያልፋል
+    res.json({ 
+        success: true, 
+        user: req.user // የዩዘሩን መረጃ (id, username, role) ለ React ይመልሳል
+    });
+});
+
 module.exports = router;

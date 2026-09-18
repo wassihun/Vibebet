@@ -26,4 +26,12 @@ const isAdmin = (req, res, next) => {
     next();
 };
 
-module.exports = { verifyToken, isAdmin };
+// 🔒 SECURITY: የሰራተኞች (አድሚን እና ካሼር) ማረጋገጫ
+const isStaff = (req, res, next) => {
+    if (!req.user || (req.user.role !== 'admin' && req.user.role !== 'cashier')) {
+        return res.status(403).json({ success: false, message: 'ይህንን ተግባር መፈጸም የሚችሉት ሰራተኞች ብቻ ናቸው!' });
+    }
+    next();
+};
+
+module.exports = { verifyToken, isAdmin, isStaff };

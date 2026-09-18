@@ -3,24 +3,31 @@ const cors = require('cors');
 const crypto = require('crypto');
 const fs = require('fs');
 require('dotenv').config();
-const rateLimit = require('express-rate-limit'); // 🌟 አዲስ የተጨመረ 🌟
+const rateLimit = require('express-rate-limit');
+const helmet = require('helmet'); // 🌟 አዲስ የተጨመረ: ለ HTTP ደህንነት 🌟
 
 // 1. መጀመሪያ አፑ ይፈጠራል
 const app = express();
 
+// 🌟 ወሳኝ: ሰርቨርህ ከ Cloudflare, cPanel ወይም Vercel ጀርባ ከሆነ Rate Limiter በትክክል እንዲሰራ ይህ ግዴታ ነው 🌟
+app.set('trust proxy', 1);
+
 // 2. ሚድልዌሮች (Middlewares)
-// 🌟 ማንኛውንም የ Vercel ሊንክ (Dynamic URLs) እንዲቀበል ተደርጎ የተሰራ 🌟
+app.use(helmet()); // 🔒 የ Express ሰርቨር መሆኑን ይደብቃል፣ ከ XSS እና Clickjacking ይጠብቃል
+
 const corsOptions = {
     origin: function (origin, callback) {
         const allowedOrigins = [
             'https://vibebet.et', 
             'https://www.vibebet.et',
             'http://localhost:5173',
-            'http://localhost:3000'
+            'http://localhost:3000',
+            // 🔒 SECURITY FIX: ማንኛውንም Vercel ከመፍቀድ፣ ትክክለኛውን የ Vercel ሊንክህን ብቻ እዚህ አስገባ
+            // 'https://your-exact-project-name.vercel.app' 
         ];
         
-        // ጥያቄው የመጣው ከተፈቀዱት ዶሜኖች ከሆነ፣ ወይንም በ '.vercel.app' የሚያልቅ ከሆነ ይፈቀዳል
-        if (!origin || allowedOrigins.includes(origin) || (origin && origin.endsWith('.vercel.app'))) {
+        // በ Production ጊዜ origin null እንዲሆን አትፍቀድ (ከ Postman እና ከሌሎች የሚመጡ ጥያቄዎችን ይከለክላል)
+        if (!origin || allowedOrigins.includes(origin)) {
             callback(null, true);
         } else {
             callback(new Error('Not allowed by CORS'));

@@ -11,6 +11,9 @@ router.post('/booking/:code/confirm', verifyToken, ticketController.confirmBooki
 router.get('/check/:code', ticketController.checkTicket);
 router.get('/load/:code', ticketController.loadTicket);
 
+// 🌟 ማስተካከያ፡ authenticateAdmin ወደ verifyToken ተቀይሯል 🌟
+router.get('/all', verifyToken, ticketController.getAllTickets);
+
 // 2. የካሼር ክፍያ (Payout) እና ስረዛ (Void)
 router.post('/payout', verifyToken, ticketController.payoutTicket);
 router.post('/void', verifyToken, ticketController.voidTicket);
