@@ -1,15 +1,190 @@
 const db = require('../config/db');
-const crypto = require('crypto'); // 🛡️ የደህንነት ማሻሻያ 2፡ ለመገመት የሚያስቸግሩ ቁጥሮች ለማውጣት
+const crypto = require('crypto');
 
-// 🌟 1. ትኬት መቁረጥ እና ማስተዳደር
+const MIN_STAKE = 20;
+const MAX_STAKE = 10000;
+const MAX_WIN = 10000;
+const VOID_WINDOW_MINUTES = 20;
+const MATCH_START_BUFFER_MS = 60 * 1000;
+
+const asText = value => String(value ?? '').trim();
+
+// ==============================================================================
+// 🌟 1. የ Frontend-ን ፎርሙላ የሚጠቀም ማርኬት አጣሪ (Perfected Ticket Placement)
+// ==============================================================================
+
+const extractRawMarkets = (oddsData) => {
+    const parsed = typeof oddsData === 'string' ? JSON.parse(oddsData) : oddsData;
+    const bookmakers = Array.isArray(parsed) ? parsed : [parsed];
+    if (bookmakers && bookmakers[0]) {
+        return bookmakers[0].bets || bookmakers[0].markets || [];
+    }
+    return [];
+};
+
+const sanitizeIdPart = (s) => String(s ?? '').trim().replace(/[^a-zA-Z0-9+\-.]/g, '_');
+
+const getMarketKind = (mkt) => {
+    const idNum = Number(mkt?.id);
+    const key = mkt?.key;
+    const title = String(mkt?.name || mkt?.title || '').toLowerCase();
+    if (idNum === 1 || idNum === 13 || key === 'h2h' || ['match winner', '3 way', 'full time result', 'first half winner'].includes(title)) return 'h2h';
+    if (idNum === 12 || key === 'double_chance' || title.includes('double chance')) return 'dc';
+    return 'other';
+};
+
+const standardizeOptionLabel = (kind, rawLabel, matchInfo) => {
+    const label = String(rawLabel ?? '').trim();
+    if (kind === 'h2h') {
+        if (label === matchInfo?.home_team || label === 'Home' || label === '1') return '1';
+        if (label === 'Draw' || label === 'X') return 'X';
+        if (label === matchInfo?.away_team || label === 'Away' || label === '2') return '2';
+        return label;
+    }
+    if (kind === 'dc') {
+        if (['1X', '12', 'X2'].includes(label)) return label;
+        if (label.includes('Home') && label.includes('Draw')) return '1X';
+        if (label.includes('Home') && label.includes('Away')) return '12';
+        if (label.includes('Draw') && label.includes('Away')) return 'X2';
+        return label;
+    }
+    return label;
+};
+
+const buildOddId = (marketRef, optionLabel, gameId) =>
+    `${sanitizeIdPart(marketRef)}_${sanitizeIdPart(optionLabel)}_${gameId}`;
+
+const resolveCanonicalSelection = (matchInfo, item) => {
+    const rawMarkets = extractRawMarkets(matchInfo.odds_data);
+    const targetOddId = String(item.odd_id);
+    
+    let bestCandidate = null;
+
+    for (const bet of rawMarkets) {
+        const outcomesArray = bet.values || bet.outcomes || [];
+        if (!outcomesArray || outcomesArray.length === 0) continue;
+
+        const rawTitle = String(bet.title || bet.name || "Market").trim();
+        
+        let betId = Number(bet.id);
+        if (!betId && bet.key) {
+            if (bet.key === 'h2h') betId = 1;
+            else if (bet.key === 'double_chance') betId = 12;
+            else if (bet.key === 'totals') betId = 5;
+            else if (bet.key === 'btts') betId = 8;
+            else {
+                const match = String(bet.key).match(/\d+/);
+                if (match) betId = parseInt(match[0], 10);
+            }
+        }
+
+        const marketKind = getMarketKind(bet);
+        const marketRef = bet.key || betId || rawTitle;
+
+        for (const outcome of outcomesArray) {
+            const rawLabel = outcome.name || outcome.value || outcome.label;
+            const standardOpt = standardizeOptionLabel(marketKind, rawLabel, matchInfo);
+            const generatedOddId = buildOddId(marketRef, standardOpt, matchInfo.id);
+
+            if (generatedOddId === targetOddId) {
+                bestCandidate = { market: bet, outcome: outcome };
+                break;
+            }
+        }
+        if (bestCandidate) break;
+    }
+
+    if (!bestCandidate) {
+        return null; 
+    }
+
+    const { market, outcome } = bestCandidate;
+
+    return {
+        fixture_id: item.fixture_id,
+        odd_id: item.odd_id,
+        odd_value: Number(outcome.price || outcome.odd).toFixed(2), 
+        odd_name: asText(item.odd_name), 
+        market_id: String(market.id || ''),
+        market_key: String(market.key || market.name || ''),
+        market_name: asText(item.market_name || "Match Market"), 
+        league_name: item.league_name || matchInfo.league_name || matchInfo.league || null,
+        sport_key: item.sport_key || item.sport || matchInfo.sport_key || null,
+        match_info: item.match_info || `${matchInfo.home_team} vs ${matchInfo.away_team}`
+    };
+};
+
+const getTicketItems = async (connection, ticketId) => {
+    const [items] = await connection.query(
+        `SELECT ti.*, sm.commence_time
+         FROM ticket_items ti
+         LEFT JOIN saved_matches sm ON ti.fixture_id = sm.id
+         WHERE ti.ticket_id = ?`,
+        [ticketId]
+    );
+    return items;
+};
+
+const calculateTicketResult = (ticket, items) => {
+    let lastMatchTime = new Date(ticket.created_at).getTime();
+    let isLost = false;
+    let isPending = false;
+    let calculatedOdds = 1;
+
+    for (const item of items) {
+        const matchTime = new Date(
+            item.commence_time || ticket.created_at
+        ).getTime();
+
+        if (matchTime > lastMatchTime) lastMatchTime = matchTime;
+
+        if (item.match_status === 'lost') {
+            isLost = true;
+        } else if (item.match_status === 'won') {
+            calculatedOdds *= Number(item.odd_value);
+        } else if (
+            item.match_status === 'postponed' ||
+            item.match_status === 'cancelled' ||
+            item.match_status === 'abandoned'
+        ) {
+            calculatedOdds *= 1;
+        } else {
+            isPending = true;
+        }
+    }
+
+    let status = 'won';
+    if (isLost) status = 'lost';
+    else if (isPending) status = 'pending';
+
+    const potentialWin = Number(
+        (calculatedOdds * Number(ticket.stake_amount)).toFixed(2)
+    );
+
+    return {
+        status,
+        potentialWin,
+        lastMatchTime
+    };
+};
+
+// ==============================================================================
+// 🌟 2. ትኬት መቁረጥ እና ማስተዳደር (Ticket Functions)
+// ==============================================================================
+
 const placeTicket = async (req, res) => {
     let connection;
+    let transactionStarted = false;
     try {
         const { stake_amount, is_guest, selections } = req.body;
+        const isGuestBooking = is_guest === true || is_guest === 'true';
+
+        if (!isGuestBooking && !req.user?.id) {
+            return res.status(401).json({ success: false, message: 'ይህን ትኬት ለመቁረጥ መግባት ያስፈልጋል' });
+        }
         
-        // 🔒 SECURITY 1: Strict Input Validation
         const stake = parseFloat(stake_amount);
-        if (isNaN(stake) || stake < 20 || stake > 10000) {
+        if (!Number.isFinite(stake) || stake < MIN_STAKE || stake > MAX_STAKE) {
             return res.status(400).json({ success: false, message: 'የተሳሳተ የገንዘብ መጠን (Stake)!' });
         }
 
@@ -17,8 +192,7 @@ const placeTicket = async (req, res) => {
             return res.status(400).json({ success: false, message: 'ምንም አይነት ጨዋታ አልተመረጠም!' });
         }
 
-        // 🛡️ የደህንነት ማሻሻያ 1፡ ከአንድ ጨዋታ ከአንድ በላይ ምርጫ መቁረጥን መከልከል (Same-Match Exploit Prevention)
-        const uniqueFixtures = new Set(selections.map(s => s.fixture_id));
+        const uniqueFixtures = new Set(selections.map(s => String(s.fixture_id)));
         if (uniqueFixtures.size !== selections.length) {
             return res.status(400).json({ success: false, message: 'ከአንድ ጨዋታ ከአንድ በላይ ምርጫ ማካተት አይቻልም!' });
         }
@@ -26,7 +200,7 @@ const placeTicket = async (req, res) => {
         connection = await db.getConnection();
 
         const fixtureIds = selections.map(s => s.fixture_id);
-        const [matches] = await connection.query('SELECT id, commence_time, odds_data FROM saved_matches WHERE id IN (?)', [fixtureIds]);
+        const [matches] = await connection.query('SELECT id, commence_time, odds_data, sport_key, home_team, away_team FROM saved_matches WHERE id IN (?)', [fixtureIds]);
 
         let calculatedTotalOdds = 1;
         for (let item of selections) {
@@ -36,59 +210,35 @@ const placeTicket = async (req, res) => {
                 return res.status(400).json({ success: false, message: 'አንዳንድ ጨዋታዎች በሲስተሙ ውስጥ አልተገኙም!' });
             }
 
-            // 🛡️ የደህንነት ማሻሻያ 4፡ ጨዋታው ሊጀምር 1 ደቂቃ (60,000 ms) ሲቀረው መቁረጥ ይዘጋል
-            if (new Date(matchInfo.commence_time).getTime() - 60000 < new Date().getTime()) {
+            if (new Date(matchInfo.commence_time).getTime() - MATCH_START_BUFFER_MS < Date.now()) {
                 return res.status(400).json({ success: false, message: 'ጨዋታው ሊጀምር ስለሆነ ወይም ስላለፈ መቁረጥ አይቻልም!' });
             }
 
-            const itemOdd = parseFloat(item.odd_value);
-            if (isNaN(itemOdd) || itemOdd < 1) {
-                console.log("❌ Invalid Odd Received:", item);
-                return res.status(400).json({ success: false, message: `የተሳሳተ የኦድስ (Odds) ዋጋ ተገኝቷል (${item.odd_value})!` });
+            const canonicalSelection = resolveCanonicalSelection(matchInfo, item);
+            if (!canonicalSelection) {
+                return res.status(400).json({ success: false, message: `የተሳሳተ market ወይም odds ተልኳል! (${item.match_info})` });
             }
 
-            // ⚠️ ODDS SECURITY: ተጫዋቹ የላከው ኦድ ትክክለኛ መሆኑን ማረጋገጥ
-            let isOddValid = false;
-            try {
-                const oddsData = JSON.parse(matchInfo.odds_data);
-                for (const bm of oddsData) {
-                    for (const m of bm.markets) {
-                        for (const o of m.outcomes) {
-                            if (Math.abs(parseFloat(o.price) - itemOdd) < 0.01) {
-                                isOddValid = true;
-                            }
-                        }
-                    }
-                }
-            } catch (e) {
-                console.error("Odds checking error", e);
-            }
-
-            if (!isOddValid) {
-                return res.status(400).json({ success: false, message: 'የተጭበረበረ ወይም የተቀየረ ኦድ (Odds) ዋጋ ተገኝቷል!' });
-            }
-
-            calculatedTotalOdds *= itemOdd;
+            item._canonical = canonicalSelection;
+            calculatedTotalOdds *= Number(canonicalSelection.odd_value);
         }
 
-        // 🛡️ የደህንነት ማሻሻያ 5፡ Floating Point Precision Fix
         calculatedTotalOdds = Math.round(calculatedTotalOdds * 100) / 100;
         let calculatedPotentialWin = Math.round((calculatedTotalOdds * stake) * 100) / 100;
         
-        const maxWinLimit = 10000;
-        if (calculatedPotentialWin > maxWinLimit) {
-            return res.status(400).json({ success: false, message: `ከፍተኛው ማሸነፊያ ${maxWinLimit} ብር ብቻ ነው!` });
+        if (calculatedPotentialWin > MAX_WIN) {
+            return res.status(400).json({ success: false, message: `ከፍተኛው ማሸነፊያ ${MAX_WIN} ብር ብቻ ነው!` });
         }
 
         let userId = null;
-        if (!is_guest && req.user) userId = req.user.id;
+        if (!isGuestBooking && req.user) userId = req.user.id;
 
-        // 🛡️ የደህንነት ማሻሻያ 2፡ Cryptographically Secure Random Numbers
-        const ticketNumber = is_guest ? null : crypto.randomInt(10000000, 99999999).toString();
-        const bookingCode = is_guest ? crypto.randomInt(100000, 999999).toString() : null;
-        const status = is_guest ? 'pending' : 'active';
+        const ticketNumber = isGuestBooking ? null : crypto.randomInt(10000000, 99999999).toString();
+        const bookingCode = isGuestBooking ? crypto.randomInt(100000, 999999).toString() : null;
+        const status = isGuestBooking ? 'pending' : 'active';
 
         await connection.beginTransaction();
+        transactionStarted = true;
 
         const [ticketResult] = await connection.query(
             'INSERT INTO tickets (user_id, ticket_number, booking_code, stake_amount, total_odds, potential_win, status) VALUES (?, ?, ?, ?, ?, ?, ?)',
@@ -96,18 +246,19 @@ const placeTicket = async (req, res) => {
         );
 
         for (let item of selections) {
+            const selection = item._canonical;
             await connection.query(
-                'INSERT INTO ticket_items (ticket_id, fixture_id, odd_id, odd_value, match_info, odd_name) VALUES (?, ?, ?, ?, ?, ?)',
-                [ticketResult.insertId, item.fixture_id, item.odd_id, parseFloat(item.odd_value).toFixed(2), item.match_info || 'Match', item.odd_name || 'Odd']
+                `INSERT INTO ticket_items (ticket_id, fixture_id, odd_id, market_id, market_key, market_name, league_name, sport_key, odd_value, match_info, odd_name) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                [ticketResult.insertId, selection.fixture_id, selection.odd_id, selection.market_id, selection.market_key, selection.market_name, selection.league_name, selection.sport_key, selection.odd_value, selection.match_info, selection.odd_name]
             );
         }
 
         await connection.commit();
         res.json({ success: true, data: { ticket_number: ticketNumber, booking_code: bookingCode } });
     } catch (error) {
-        if (connection) await connection.rollback();
+        if (connection && transactionStarted) await connection.rollback();
         console.error("❌ Place Ticket DB Error:", error);
-        res.status(500).json({ success: false, message: 'ትኬት መቁረጥ አልተቻለም', db_error: error.message });
+        res.status(500).json({ success: false, message: 'ትኬት መቁረጥ አልተቻለም' });
     } finally {
         if (connection) connection.release();
     }
@@ -125,6 +276,10 @@ const getBooking = async (req, res) => {
 const confirmBooking = async (req, res) => {
     let connection;
     try {
+        if (!req.user?.id) {
+            return res.status(401).json({ success: false, message: 'ይህን ትኬት ለማረጋገጥ የካሼር መግቢያ ያስፈልጋል' });
+        }
+
         connection = await db.getConnection();
         await connection.beginTransaction();
 
@@ -135,7 +290,14 @@ const confirmBooking = async (req, res) => {
         }
         
         const ticket = tickets[0];
-        if (ticket.status !== 'pending' || ticket.ticket_number) {
+
+        if (ticket.ticket_number && ticket.status !== 'void') {
+            const items = await getTicketItems(connection, ticket.id);
+            await connection.rollback();
+            return res.json({ success: true, data: { ...ticket, selections: items } });
+        }
+
+        if (ticket.status !== 'pending') {
             await connection.rollback();
             return res.status(400).json({ success: false, message: 'ይህ ትኬት አስቀድሞ ተቆርጧል ወይም ተሰርዟል!' });
         }
@@ -146,29 +308,36 @@ const confirmBooking = async (req, res) => {
         if (fixtureIds.length > 0) {
             const [matches] = await connection.query('SELECT id, commence_time FROM saved_matches WHERE id IN (?)', [fixtureIds]);
             for (let match of matches) {
-                // 🛡️ የደህንነት ማሻሻያ 4 (በ Confirm ጊዜም)፡ 1 ደቂቃ Buffer
-                if (new Date(match.commence_time).getTime() - 60000 < new Date().getTime()) {
+                if (new Date(match.commence_time).getTime() - MATCH_START_BUFFER_MS < Date.now()) {
                     await connection.rollback();
                     return res.status(400).json({ success: false, message: 'በትኬቱ ውስጥ የጀመሩ ጨዋታዎች ስላሉ ማረጋገጥ አይቻልም! እባክዎ አዲስ ይቁረጡ።' });
                 }
             }
         }
         
-        // 🛡️ የደህንነት ማሻሻያ 2
         const ticketNumber = crypto.randomInt(10000000, 99999999).toString();
         await connection.query('UPDATE tickets SET ticket_number = ?, status = ?, user_id = ? WHERE id = ?', [ticketNumber, 'active', req.user.id, ticket.id]);
-        
+
+        const finalItems = await getTicketItems(connection, ticket.id);
+        const confirmedTicket = {
+            ...ticket,
+            ticket_number: ticketNumber,
+            status: 'active',
+            user_id: req.user.id,
+            selections: finalItems
+        };
+
         await connection.commit();
-        res.json({ success: true, data: { ticket_number: ticketNumber } });
+        res.json({ success: true, data: confirmedTicket });
     } catch (error) { 
         if (connection) await connection.rollback();
-        res.status(500).json({ success: false }); 
+        console.error('Confirm booking error:', error);
+        res.status(500).json({ success: false, message: 'ትኬቱን ማረጋገጥ አልተቻለም' }); 
     } finally {
         if (connection) connection.release();
     }
 };
 
-// 🌟 የፍሮንትኤንድ ማረጋገጫ
 const checkTicket = async (req, res) => {
     try {
         const code = req.params.code.trim(); 
@@ -176,32 +345,21 @@ const checkTicket = async (req, res) => {
         if (tickets.length === 0) return res.status(404).json({ success: false, message: 'ይህ ትኬት አልተገኘም! ቁጥሩን በትክክል ያስገቡ።' });
 
         let ticket = tickets[0];
-        const [items] = await db.query('SELECT ti.*, sm.commence_time FROM ticket_items ti LEFT JOIN saved_matches sm ON ti.fixture_id = sm.id WHERE ti.ticket_id = ?', [ticket.id]);
-        
+        const items = await getTicketItems(db, ticket.id);
+
         if (ticket.status === 'active' || ticket.status === 'pending') {
-            let isLost = false;
-            let isPending = false;
-            let calculatedOdds = 1;
+            const result = calculateTicketResult(ticket, items);
+            ticket.status = result.status;
 
-            items.forEach(item => {
-                if (item.match_status === 'lost') {
-                    isLost = true;
-                } else if (item.match_status === 'won') {
-                    calculatedOdds *= parseFloat(item.odd_value);
-                } else if (item.match_status === 'postponed' || item.match_status === 'cancelled' || item.match_status === 'abandoned') {
-                    calculatedOdds *= 1; 
-                } else {
-                    isPending = true; 
-                }
-            });
+            if (result.status === 'won') {
+                ticket.potential_win = result.potentialWin.toFixed(2);
+            }
 
-            if (isLost) {
-                ticket.status = 'lost';
-            } else if (isPending) {
-                ticket.status = 'pending';
-            } else {
-                ticket.status = 'won';
-                ticket.potential_win = (calculatedOdds * parseFloat(ticket.stake_amount)).toFixed(2);
+            if (result.status !== tickets[0].status || result.status === 'won') {
+                await db.query(
+                    `UPDATE tickets SET status = ?, potential_win = ? WHERE id = ? AND status NOT IN ('paid', 'void', 'expired')`,
+                    [result.status, result.potentialWin.toFixed(2), ticket.id]
+                );
             }
         }
 
@@ -218,91 +376,122 @@ const loadTicket = async (req, res) => {
     } catch (error) { res.status(500).json({ success: false }); }
 };
 
-// 🌟 2. ክፍያ (Payout) 100% አስተማማኝ
 const payoutTicket = async (req, res) => {
+    let connection;
     try {
         const ticketNumber = req.body.ticket_number ? String(req.body.ticket_number).trim() : '';
         if (!ticketNumber) {
             return res.status(400).json({ success: false, message: 'የትኬት ቁጥር አልተላከም' });
         }
 
-        const [tickets] = await db.query('SELECT * FROM tickets WHERE ticket_number = ? OR booking_code = ?', [ticketNumber, ticketNumber]);
+        connection = await db.getConnection();
+        await connection.beginTransaction();
+
+        const [tickets] = await connection.query(
+            'SELECT * FROM tickets WHERE ticket_number = ? OR booking_code = ? FOR UPDATE',
+            [ticketNumber, ticketNumber]
+        );
         
         if (tickets.length === 0) {
+            await connection.rollback();
             return res.status(404).json({ success: false, message: 'ትኬቱ አልተገኘም' });
         }
 
         const ticket = tickets[0];
         
-        if (ticket.status === 'paid') return res.status(400).json({ success: false, message: 'ይህ ትኬት አስቀድሞ ተከፍሎታል!' });
-        if (ticket.status === 'void') return res.status(400).json({ success: false, message: 'ይህ ትኬት የተሰረዘ (Void) ነው!' });
+        if (ticket.status === 'paid') {
+            await connection.rollback();
+            return res.status(400).json({ success: false, message: 'ይህ ትኬት አስቀድሞ ተከፍሎታል!' });
+        }
 
-        const [items] = await db.query('SELECT ti.*, sm.commence_time FROM ticket_items ti LEFT JOIN saved_matches sm ON ti.fixture_id = sm.id WHERE ti.ticket_id = ?', [ticket.id]);
+        if (ticket.status === 'void') {
+            await connection.rollback();
+            return res.status(400).json({ success: false, message: 'ይህ ትኬት የተሰረዘ (Void) ነው!' });
+        }
 
-        let lastMatchTime = new Date(ticket.created_at).getTime();
-        let isLost = false;
-        let isPending = false;
-        let calculatedOdds = 1;
+        const items = await getTicketItems(connection, ticket.id);
+        const result = calculateTicketResult(ticket, items);
 
-        items.forEach(item => {
-            const mTime = new Date(item.commence_time || ticket.created_at).getTime();
-            if (mTime > lastMatchTime) lastMatchTime = mTime;
-
-            if (item.match_status === 'lost') {
-                isLost = true;
-            } else if (item.match_status === 'won') {
-                calculatedOdds *= parseFloat(item.odd_value);
-            } else if (item.match_status === 'postponed' || item.match_status === 'cancelled' || item.match_status === 'abandoned') {
-                calculatedOdds *= 1; 
-            } else {
-                isPending = true; 
-            }
-        });
-
-        if (Date.now() > lastMatchTime + (3 * 24 * 60 * 60 * 1000)) {
-            await db.query("UPDATE tickets SET status = 'expired' WHERE id = ?", [ticket.id]);
+        if (Date.now() > result.lastMatchTime + (3 * 24 * 60 * 60 * 1000)) {
+            await connection.query(
+                "UPDATE tickets SET status = 'expired' WHERE id = ? AND status NOT IN ('paid', 'void')",
+                [ticket.id]
+            );
+            await connection.commit();
             return res.status(400).json({ success: false, message: 'የዚህ ትኬት መክፈያ ጊዜ (3 ቀን) አልፏል! ክፍያው ውድቅ ሆኗል።' });
         }
 
-        if (isLost || ticket.status === 'lost') {
+        if (result.status === 'lost' || ticket.status === 'lost') {
+            await connection.query(
+                "UPDATE tickets SET status = 'lost' WHERE id = ? AND status NOT IN ('paid', 'void', 'expired')",
+                [ticket.id]
+            );
+            await connection.commit();
             return res.status(400).json({ success: false, message: 'ይህ ትኬት አላሸነፈም (ተሸንፏል)!' });
         }
 
-        if (isPending) {
+        if (result.status === 'pending') {
+            await connection.rollback();
             return res.status(400).json({ success: false, message: 'ትኬቱ አሁንም ውጤት እየጠበቀ (Pending) ነው! ሁሉም ጨዋታዎች አላለቁም።' });
         }
 
-        const finalWinAmount = (calculatedOdds * parseFloat(ticket.stake_amount)).toFixed(2);
+        const finalWinAmount = result.potentialWin.toFixed(2);
 
-        const [updateResult] = await db.query(
-            "UPDATE tickets SET status = 'paid', potential_win = ? WHERE id = ? AND status != 'paid'", 
+        const [updateResult] = await connection.query(
+            "UPDATE tickets SET status = 'paid', potential_win = ? WHERE id = ? AND status NOT IN ('paid', 'void', 'expired')", 
             [finalWinAmount, ticket.id]
         );
 
         if (updateResult.affectedRows === 0) {
+            await connection.rollback();
             return res.status(400).json({ success: false, message: 'ክፍያው አስቀድሞ ተፈጽሟል!' });
         }
-        
-        res.json({ success: true, message: 'ክፍያው በተሳካ ሁኔታ ተፈጽሟል', payout_data: { amount_paid: finalWinAmount } });
+
+        await connection.commit();
+        res.json({
+            success: true,
+            message: 'ክፍያው በተሳካ ሁኔታ ተፈጽሟል',
+            payout_amount: finalWinAmount,
+            payout_data: { amount_paid: finalWinAmount }
+        });
 
     } catch (error) { 
+        if (connection) await connection.rollback();
         console.error("Payout Error: ", error);
         res.status(500).json({ success: false, message: 'ክፍያ መፈጸም አልተቻለም (Server Error)' }); 
+    } finally {
+        if (connection) connection.release();
     }
 };
 
 const voidTicket = async (req, res) => {
     try {
-        const [tickets] = await db.query('SELECT id, user_id, status, created_at FROM tickets WHERE ticket_number = ?', [req.body.ticket_number.trim()]);
+        const requestedTicketNumber = asText(req.body.ticket_number);
+        if (!requestedTicketNumber) {
+            return res.status(400).json({ success: false, message: 'የትኬት ቁጥር አልተላከም' });
+        }
+
+        const [tickets] = await db.query(
+            'SELECT id, user_id, status, created_at FROM tickets WHERE ticket_number = ?',
+            [requestedTicketNumber]
+        );
         if (tickets.length === 0) return res.status(404).json({ success: false, message: 'ትኬቱ አልተገኘም' });
 
         const ticket = tickets[0];
         if (ticket.status !== 'active') return res.status(400).json({ success: false, message: 'ትኬቱ አክቲቭ አይደለም (መሰረዝ አይቻልም)' });
-        if (ticket.user_id !== req.user.id && req.user.role !== 'admin') return res.status(403).json({ success: false, message: 'መሰረዝ የሚችለው የቆረጠው ካሼር ብቻ ነው' });
+        if (!req.user) {
+            return res.status(401).json({ success: false, message: 'የካሼር መግቢያ ያስፈልጋል' });
+        }
+        if (ticket.user_id !== req.user.id && req.user.role !== 'admin') {
+            return res.status(403).json({ success: false, message: 'መሰረዝ የሚችለው የቆረጠው ካሼር ብቻ ነው' });
+        }
 
         const [timeCheck] = await db.query('SELECT TIMESTAMPDIFF(MINUTE, created_at, NOW()) as diff FROM tickets WHERE id = ?', [ticket.id]);
-        if (timeCheck[0].diff >= 5) {
-            return res.status(400).json({ success: false, message: 'ትኬቱን መሰረዝ የሚቻለው ከተቆረጠ በ 5 ደቂቃ ውስጥ ብቻ ነው!' });
+        if (timeCheck[0].diff >= VOID_WINDOW_MINUTES) {
+            return res.status(400).json({
+                success: false,
+                message: `ትኬቱን መሰረዝ የሚቻለው ከተቆረጠ በ ${VOID_WINDOW_MINUTES} ደቂቃ ውስጥ ብቻ ነው!`
+            });
         }
 
         await db.query("UPDATE tickets SET status = 'void' WHERE id = ?", [ticket.id]);
@@ -310,8 +499,12 @@ const voidTicket = async (req, res) => {
     } catch (error) { res.status(500).json({ success: false, message: 'ትኬቱን መሰረዝ አልተቻለም' }); }
 };
 
-// 🌟 3. ሪፖርቶች (Reports & History)
-const getHistory = async (req, res) => {
+// ==============================================================================
+// 🌟 3. የአድሚን እና የካሼር ሪፖርቶች (Reports & Admin Functions) 🌟
+// ==============================================================================
+
+// 🚨 የ Error መፍትሄ፡ ራውተሩ የሚፈልገው ስም "getTicketHistory" ነው
+const getTicketHistory = async (req, res) => {
     try {
         const [tickets] = await db.query("SELECT ticket_number, stake_amount, potential_win, status, created_at FROM tickets WHERE user_id = ? AND status != 'pending' ORDER BY created_at DESC LIMIT 20", [req.user.id]);
         res.json({ success: true, data: tickets });
@@ -385,7 +578,6 @@ const getAllTickets = async (req, res) => {
     if (req.user.role !== 'admin') return res.status(403).json({ success: false, message: 'ያልተፈቀደ (Unauthorized)' });
     
     try {
-        // 🛡️ የደህንነት ማሻሻያ 3፡ ሰርቨርን ላለማጨናነቅ LIMIT 200 (ወይም እንደፍላጎትህ) ተጨምሯል
         const [tickets] = await db.query(`
             SELECT t.*, u.username as cashier, u.role 
             FROM tickets t 
@@ -408,9 +600,12 @@ const getAllTickets = async (req, res) => {
     }
 };
 
+// 🌟 የፈንክሽኖች መላኪያ (Export) - ማንም ራውተር እንዳይቋረጥ በጥንቃቄ የተሰራ
 module.exports = {
-    placeTicket, getBooking, confirmBooking, checkTicket, loadTicket,
-    payoutTicket, voidTicket,
-    getHistory, getCashierReport, getSummaryReport, getStaffList, 
-    getAllTickets 
+    placeTicket, getBooking, confirmBooking, checkTicket, loadTicket, payoutTicket, voidTicket,
+    
+    // ራውተር የሚጠይቃቸው ስሞች እንዳይሳሳቱ Alias ተሰጥቷቸዋል
+    getTicketHistory, getHistory: getTicketHistory, history: getTicketHistory,
+    getCashierReport, report: getCashierReport, cashierReport: getCashierReport,
+    getSummaryReport, getStaffList, getAllTickets 
 };

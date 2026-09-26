@@ -1,30 +1,48 @@
 const express = require('express');
 const router = express.Router();
+
 const authController = require('../controllers/authController');
+const authMiddleware = require('../middleware/authMiddleware');
 
-// 🌟 አዲስ የተጨመሩ ሚድልዌሮች (ለሴኪዩሪቲ) 🌟
-const { verifyToken, isAdmin } = require('../middleware/authMiddleware');
+// 🌟 ሰርቨሩ ክራሽ እንዳያደርግ የሚከላከል እና የጠፋውን ፈንክሽን የሚነግረን ሴኪዩሪቲ ፈንክሽን
+const safeHandler = (name, fn) => {
+    if (typeof fn !== 'function') {
+        console.error(`\n🚨 ስህተት (ERROR): '${name}' የሚባለው ፈንክሽን አልተገኘም (Undefined ነው)! እባክዎ Controller ወይም Middleware ፋይሉን ቼክ ያድርጉ።\n`);
+        return (req, res) => res.status(500).json({ success: false, message: `Server Error: ${name} is missing.` });
+    }
+    return fn;
+};
 
-// የ ደህንነት (Auth) ማገናኛዎች
-router.post('/register', authController.registerUser);
-router.post('/login', authController.loginUser);
+// ==========================================
+// Routes (መንገዶች)
+// ==========================================
 
-// 🌟 SECURITY: ጥብቁ የአድሚን መመዝገቢያ (verifyToken እና isAdmin አብረው መኖር አለባቸው)
-router.post('/register-staff', verifyToken, isAdmin, authController.registerStaff);
+// 1. ተጠቃሚ መመዝገቢያ
+router.post('/register', safeHandler('registerUser', authController.registerUser));
 
-// =========================================================================
-// 🌟 የሪፖርት ፓስወርድ ማረጋገጫ API 🌟
-// =========================================================================
-router.post('/verify-password', verifyToken, authController.verifyPassword);
+// 2. ሎጊን
+router.post('/login', safeHandler('loginUser', authController.loginUser));
 
-// =========================================================================
-// 🛡️ አዲስ የተጨመረ: የቶከን ትክክለኛነት ማረጋገጫ (ለ Frontend Auto-Logout ጠቃሚ ነው) 🌟
-// =========================================================================
-router.get('/verify', verifyToken, (req, res) => {
-    // ሚድልዌሩ (verifyToken) ቶከኑ ትክክል መሆኑን ካረጋገጠ በኋላ ወደዚህ ያልፋል
-    res.json({ 
+// 3. ሰራተኛ (ካሸር/አድሚን) መመዝገቢያ (የአድሚን ፈቃድ ይፈልጋል) - (መስመር 19 የነበረው)
+router.post(
+    '/register-staff', 
+    safeHandler('verifyToken', authMiddleware.verifyToken), 
+    safeHandler('isAdmin', authMiddleware.isAdmin), 
+    safeHandler('registerStaff', authController.registerStaff)
+);
+
+// 4. ሪፖርት መክፈቻ ፓስወርድ ማረጋገጫ (Verify Password)
+router.post(
+    '/verify-password', 
+    safeHandler('verifyToken', authMiddleware.verifyToken), 
+    safeHandler('verifyPassword', authController.verifyPassword)
+);
+
+// 5. ቶከን (Token) ማረጋገጫ 
+router.get('/verify', safeHandler('verifyToken', authMiddleware.verifyToken), (req, res) => {
+    return res.json({ 
         success: true, 
-        user: req.user // የዩዘሩን መረጃ (id, username, role) ለ React ይመልሳል
+        user: req.user 
     });
 });
 
