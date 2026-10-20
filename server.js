@@ -23,7 +23,7 @@ const corsOptions = {
             'http://localhost:5173',
             'http://localhost:3000',
             // 🔒 SECURITY FIX: ማንኛውንም Vercel ከመፍቀድ፣ ትክክለኛውን የ Vercel ሊንክህን ብቻ እዚህ አስገባ
-            // 'https://your-exact-project-name.vercel.app' 
+            'vibebet-frontend.vercel.app', 
         ];
         
         // በ Production ጊዜ origin null እንዲሆን አትፍቀድ (ከ Postman እና ከሌሎች የሚመጡ ጥያቄዎችን ይከለክላል)
