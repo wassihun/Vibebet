@@ -22,6 +22,7 @@ const corsOptions = {
             'https://www.vibebet.et',
             'http://localhost:5173',
             'http://localhost:3000',
+            'vibebet-frontend-ag8jnop6h-wass9.vercel.app',
             // 🔒 SECURITY FIX: ማንኛውንም Vercel ከመፍቀድ፣ ትክክለኛውን የ Vercel ሊንክህን ብቻ እዚህ አስገባ
         ];
         
