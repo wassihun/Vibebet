@@ -57,7 +57,9 @@ const registerUser = async (req, res) => {
 
             const saltRounds = 10;
             const password_hash = await bcrypt.hash(password, saltRounds);
-            const generatedUsername = `User_${phone.substring(phone.length - 4)}`;
+            const generatedUsername = username && username.trim() !== '' 
+                ? username.trim() 
+                : `User_${String(phone).slice(-4)}`;
 
             const [result] = await db.execute(
                 'INSERT INTO users (username, phone_number, password_hash, role, current_balance, status) VALUES (?, ?, ?, ?, ?, ?)',
@@ -115,7 +117,7 @@ const registerUser = async (req, res) => {
 const loginUser = async (req, res) => {
     // ኦንላይን ዩዘሮች 'phone' ይልካሉ፣ ካሼሮች 'username' ይልካሉ
     const { username, phone, password } = req.body;
-    const identifier = phone || username;
+    const identifier = (phone || username || '').trim();
 
     if (!identifier || !password) {
         return res.status(400).json({ success: false, message: 'እባክዎ መለያ እና የይለፍ ቃል ያስገቡ!' });
@@ -137,6 +139,25 @@ const loginUser = async (req, res) => {
         const isMatch = await bcrypt.compare(password, user.password_hash);
         if (!isMatch) {
             return res.status(401).json({ success: false, message: 'የተጠቃሚ ስም/ስልክ ወይም የይለፍ ቃል ትክክል አይደለም' });
+        }
+
+        const userRole = String(user.role || 'user').toLowerCase().trim();
+        const staffRoles = ['cashier', 'admin', 'agent', 'shop', 'superadmin'];
+
+        // 🔒 SECURITY FIX 1: በተጫዋች መግቢያ (phone በሚልከው ፎርም) ካሸር ወይም አድሚን እንዳይገባ መከልከል
+        if (phone && !username && staffRoles.includes(userRole)) {
+            return res.status(403).json({
+                success: false,
+                message: 'ይህ የካሸር/የአድሚን አካውንት ነው! በተጫዋች መግቢያ መግባት አይፈቀድም።'
+            });
+        }
+
+        // 🔒 SECURITY FIX 2: በካሸር/አድሚን መግቢያ (username በሚልከው ፎርም) ተራ ተጫዋች እንዳይገባ መከልከል
+        if (username && !phone && !staffRoles.includes(userRole)) {
+            return res.status(403).json({
+                success: false,
+                message: 'ይህ የተጫዋች አካውንት ነው! በሰራተኞች መግቢያ መግባት አይፈቀድም።'
+            });
         }
 
         const token = jwt.sign(
