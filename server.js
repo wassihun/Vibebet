@@ -83,8 +83,8 @@ startCronJobs();
 // 6. ፖርት ማዘጋጀት (Port Configuration)
 const PORT = process.env.PORT || 5000;
 
-// 7. ሰርቨሩን ማስነሳት
-app.listen(PORT, () => {
+// 7. ሰርቨሩን ማስነሳት (🌟 '0.0.0.0' መጨመሩ ሰርቨሩ ከውጭ የሚመጡ ጥያቄዎችን እንዳይዘጋው ይከላከላል 🌟)
+app.listen(PORT, '0.0.0.0', () => {
     console.log(`=========================================`);
     console.log(`✅ የ Vibebet.et ሰርቨር በፖርት ${PORT} ላይ በትክክል እየሰራ ነው...`);
     console.log(`=========================================`);
