@@ -214,7 +214,7 @@ const buildOddsPayload = (bookmakerData, homeTeam, awayTeam) => {
             else if (name === 'Draw/Away') name = 'X2';
             return { name, price: parseFloat(v.odd) };
         });
-        finalBookmakers[0].markets.push({ key: marketKey, title: bet.name, outcomes });
+        finalBookmakers[0].markets.push({ id: bet.id, key: marketKey, title: bet.name, outcomes });
     }
     return finalBookmakers[0].markets.length > 0 ? JSON.stringify(finalBookmakers) : '[]';
 };
@@ -469,13 +469,20 @@ const fetchSofaHalfCorners = async (homeTeam, awayTeam) => {
         }
         if (!targetEv) return null;
 
-        const statsRes = await axios.get(
-            `https://api.sofascore.com/api/v1/event/${targetEv.id}/statistics`,
-            { headers: SOFASCORE_HEADERS, timeout: 4500 }
-        ).catch(() => null);
+        const [eventRes, statsRes] = await Promise.all([
+            axios.get(`https://api.sofascore.com/api/v1/event/${targetEv.id}`, { headers: SOFASCORE_HEADERS, timeout: 4500 }).catch(() => null),
+            axios.get(`https://api.sofascore.com/api/v1/event/${targetEv.id}/statistics`, { headers: SOFASCORE_HEADERS, timeout: 4500 }).catch(() => null)
+        ]);
+
+        const fullEv = eventRes?.data?.event || targetEv;
+        const hScoreObj = fullEv?.homeScore || {};
+        const aScoreObj = fullEv?.awayScore || {};
+        const htHome = hScoreObj.period1 !== undefined && hScoreObj.period1 !== null ? Number(hScoreObj.period1) : null;
+        const htAway = aScoreObj.period1 !== undefined && aScoreObj.period1 !== null ? Number(aScoreObj.period1) : null;
 
         const statsArr = statsRes?.data?.statistics || [];
         return {
+            htGoals: (htHome !== null && htAway !== null) ? { h: htHome, a: htAway } : null,
             all: extractSofaPeriodCorners(statsArr, 'ALL'),
             firstHalf: extractSofaPeriodCorners(statsArr, '1ST'),
             secondHalf: extractSofaPeriodCorners(statsArr, '2ND')
@@ -583,6 +590,7 @@ const fetchFallbackMatchFromSofaByNames = async (homeTeam, awayTeam) => {
         return {
             match: syntheticMatch,
             extraCornerData: {
+                htGoals: (htHome !== null && htAway !== null) ? { h: htHome, a: htAway } : null,
                 all: allCorners,
                 firstHalf: firstHalfCorners,
                 secondHalf: secondHalfCorners
@@ -626,11 +634,39 @@ const evalRangeOrExactValue = (optStr, targetVal) => {
     return evalOUPickValue(optStr, targetVal);
 };
 
+// 🌟 ማርኬት ID ከ odd_id ("market_6_Over_0.5_123") ወይም market_key ("market_6") በትክክል የሚያወጣ ረዳት ፈንክሽን 🌟
+const extractNumericMarketId = (pick) => {
+    const directId = parseInt(pick?.market_id, 10);
+    if (Number.isFinite(directId) && directId > 0) return directId;
+
+    const keyStr = String(pick?.market_key || '').trim().toLowerCase();
+    if (keyStr === 'h2h') return 1;
+    if (keyStr === 'double_chance' || keyStr === 'dc') return 12;
+    if (keyStr === 'totals') return 5;
+    if (keyStr === 'btts') return 8;
+    const keyMatch = keyStr.match(/^(?:market_)?(\d+)$/);
+    if (keyMatch) return parseInt(keyMatch[1], 10);
+
+    const oddIdStr = String(pick?.odd_id || '').trim().toLowerCase();
+    const oddMarketMatch = oddIdStr.match(/^market_(\d+)_/);
+    if (oddMarketMatch) return parseInt(oddMarketMatch[1], 10);
+
+    const firstToken = oddIdStr.split('_')[0];
+    if (firstToken === 'h2h') return 1;
+    if (firstToken === 'dc' || firstToken === 'double') return 12;
+    if (firstToken === 'totals') return 5;
+    if (firstToken === 'btts') return 8;
+    const firstNum = parseInt(firstToken, 10);
+    if (Number.isFinite(firstNum) && firstNum > 0) return firstNum;
+
+    return 0;
+};
+
 // ውጤቱን (won/lost/void/pending) እና በትኬቱ ላይ መታየት ያለበትን ትክክለኛ ውጤት (displayScore) አንድ ላይ የሚመልስ
 const evaluateMarketPickWithScore = (pick, match, extraCornerData = null) => {
     const opt = String(pick.odd_name || '').trim();
     const optLower = opt.toLowerCase();
-    const marketId = parseInt(pick.market_id, 10) || parseInt(String(pick.odd_id).split('_')[0], 10) || 0;
+    const marketId = extractNumericMarketId(pick);
     const marketName = String(pick.market_name || '').toLowerCase();
     const marketKey = String(pick.market_key || '').toLowerCase();
     const mCombined = `${marketName} ${marketKey}`.trim();
@@ -638,15 +674,46 @@ const evaluateMarketPickWithScore = (pick, match, extraCornerData = null) => {
     const homeName = (match.teams?.home?.name || 'Home').toLowerCase();
     const awayName = (match.teams?.away?.name || 'Away').toLowerCase();
 
+    // --- Events (Goalscorers, First/Last Goal, 10 Minutes, 1st Half Fallback) - 90 ደቂቃ ብቻ ---
+    const goalEvents = [];
+    const hasEvents = Array.isArray(match.events) && match.events.length > 0;
+    if (hasEvents) {
+        match.events.forEach(ev => {
+            const elapsed = Number(ev.time?.elapsed ?? 0);
+            if (ev.type === 'Goal' && ev.detail !== 'Missed Penalty' && elapsed <= 90 && ev.comments !== 'Penalty Shootout') {
+                goalEvents.push({
+                    team: ev.team?.id === match.teams?.home?.id ? 'home' : 'away',
+                    player: String(ev.player?.name || '').toLowerCase(),
+                    time: elapsed
+                });
+            }
+        });
+        goalEvents.sort((a, b) => a.time - b.time);
+    }
+
     // --- Goals Calculation (90 ደቂቃ ብቻ) ---
     const ftHome = Number(match.score?.fulltime?.home ?? match.goals?.home ?? 0);
     const ftAway = Number(match.score?.fulltime?.away ?? match.goals?.away ?? 0);
+    const ftTotal = ftHome + ftAway;
+
     const hasHT = match.score?.halftime?.home !== null && match.score?.halftime?.home !== undefined &&
                   match.score?.halftime?.away !== null && match.score?.halftime?.away !== undefined;
-    const htHome = hasHT ? Number(match.score.halftime.home) : (ftHome === 0 && ftAway === 0 ? 0 : null);
-    const htAway = hasHT ? Number(match.score.halftime.away) : (ftHome === 0 && ftAway === 0 ? 0 : null);
+    let htHome = hasHT ? Number(match.score.halftime.home) : null;
+    let htAway = hasHT ? Number(match.score.halftime.away) : null;
 
-    const ftTotal = ftHome + ftAway;
+    if ((htHome === null || htAway === null) && extraCornerData?.htGoals) {
+        htHome = Number(extraCornerData.htGoals.h);
+        htAway = Number(extraCornerData.htGoals.a);
+    }
+    if ((htHome === null || htAway === null) && ftHome === 0 && ftAway === 0) {
+        htHome = 0;
+        htAway = 0;
+    }
+    if ((htHome === null || htAway === null) && hasEvents && goalEvents.length === ftTotal) {
+        htHome = goalEvents.filter(g => g.team === 'home' && g.time <= 45).length;
+        htAway = goalEvents.filter(g => g.team === 'away' && g.time <= 45).length;
+    }
+
     const htTotal = (htHome !== null && htAway !== null) ? (htHome + htAway) : null;
     const stHome = htHome !== null ? Math.max(0, ftHome - htHome) : null;
     const stAway = htAway !== null ? Math.max(0, ftAway - htAway) : null;
@@ -701,23 +768,6 @@ const evaluateMarketPickWithScore = (pick, match, extraCornerData = null) => {
     if ((homeCorners === null || awayCorners === null) && extraCornerData?.all) {
         homeCorners = extraCornerData.all.h;
         awayCorners = extraCornerData.all.a;
-    }
-
-    // --- Events (Goalscorers, First/Last Goal, 10 Minutes) - 90 ደቂቃ ብቻ ---
-    const goalEvents = [];
-    const hasEvents = Array.isArray(match.events) && match.events.length > 0;
-    if (hasEvents) {
-        match.events.forEach(ev => {
-            const elapsed = Number(ev.time?.elapsed ?? 0);
-            if (ev.type === 'Goal' && ev.detail !== 'Missed Penalty' && elapsed <= 90 && ev.comments !== 'Penalty Shootout') {
-                goalEvents.push({
-                    team: ev.team?.id === match.teams?.home?.id ? 'home' : 'away',
-                    player: String(ev.player?.name || '').toLowerCase(),
-                    time: elapsed
-                });
-            }
-        });
-        goalEvents.sort((a, b) => a.time - b.time);
     }
 
     const is1 = ftHome > ftAway;
@@ -1119,16 +1169,50 @@ const evaluateMarketPickWithScore = (pick, match, extraCornerData = null) => {
         if (optLower === 'no' || optLower.includes('ng')) return { status: !periodGG ? 'won' : 'lost', score: bttsPeriod.label };
     }
 
-    if ([5, 6, 9, 16, 17, 50].includes(marketId) || mCombined.includes('total goals') || mCombined.includes('over/under') || mCombined.includes('goals over/under') || mCombined === 'totals') {
+    if (
+        [5, 6, 9, 16, 17, 50].includes(marketId) ||
+        mCombined.includes('total') ||
+        mCombined.includes('over/under') ||
+        mCombined.includes('goal line')
+    ) {
         let targetTotal = ftTotal;
         let scoreLabel = defaultScoreStr;
 
         if (marketId === 6 || mCombined.includes('1st half') || mCombined.includes('first half')) {
-            if (htTotal === null) return { status: 'pending', score: defaultScoreStr };
+            if (htTotal === null) {
+                // የ1ኛ አጋማሽ ውጤት ባይኖርም፣ በሙሉ ሰዓት ጎል እርግጠኛ መሆን የሚቻልበት ሎጂክ (Deduction)
+                const maxPossibleHT = mCombined.includes('home') ? ftHome : mCombined.includes('away') ? ftAway : ftTotal;
+                const ouMatch = opt.match(/(?:^|[\s\/(\-])(over|under|o|u|\+|\-)\s*\/?\s*\(?([\d.]+)\)?/i);
+                if (ouMatch) {
+                    const d = ouMatch[1].toLowerCase();
+                    const l = parseFloat(ouMatch[2]);
+                    if ((d === 'over' || d === 'o' || d === '+') && maxPossibleHT <= l) {
+                        return { status: 'lost', score: `FT ${defaultScoreStr}` };
+                    }
+                    if ((d === 'under' || d === 'u' || d === '-') && maxPossibleHT < l) {
+                        return { status: 'won', score: `FT ${defaultScoreStr}` };
+                    }
+                }
+                return { status: 'pending', score: defaultScoreStr };
+            }
             targetTotal = mCombined.includes('home') ? htHome : mCombined.includes('away') ? htAway : htTotal;
             scoreLabel = `1H ${htHome}:${htAway} (FT ${defaultScoreStr})`;
         } else if (marketId === 9 || mCombined.includes('2nd half') || mCombined.includes('second half')) {
-            if (stTotal === null) return { status: 'pending', score: defaultScoreStr };
+            if (stTotal === null) {
+                const maxPossibleST = mCombined.includes('home') ? ftHome : mCombined.includes('away') ? ftAway : ftTotal;
+                const ouMatch = opt.match(/(?:^|[\s\/(\-])(over|under|o|u|\+|\-)\s*\/?\s*\(?([\d.]+)\)?/i);
+                if (ouMatch) {
+                    const d = ouMatch[1].toLowerCase();
+                    const l = parseFloat(ouMatch[2]);
+                    if ((d === 'over' || d === 'o' || d === '+') && maxPossibleST <= l) {
+                        return { status: 'lost', score: `FT ${defaultScoreStr}` };
+                    }
+                    if ((d === 'under' || d === 'u' || d === '-') && maxPossibleST < l) {
+                        return { status: 'won', score: `FT ${defaultScoreStr}` };
+                    }
+                }
+                return { status: 'pending', score: defaultScoreStr };
+            }
             targetTotal = mCombined.includes('home') ? stHome : mCombined.includes('away') ? stAway : stTotal;
             scoreLabel = `2H ${stHome}:${stAway} (FT ${defaultScoreStr})`;
         } else if (marketId === 16 || mCombined.includes('home total') || mCombined.includes('home team') || mCombined.includes('total - home')) {
@@ -1283,13 +1367,16 @@ const runAutoSettlement = async () => {
 
                         if (isCompleted) {
                             unresolvedNumericIds.delete(mIdStr);
-                            const needsExtraCorners = associatedPicks.some(p => {
-                                const mName = `${p.market_name || ''} ${p.odd_name || ''}`.toLowerCase();
-                                return mName.includes('corner') && (mName.includes('1st half') || mName.includes('first half') || mName.includes('2nd half') || mName.includes('second half') || !match.statistics || match.statistics.length < 2);
+                            const htMissing = match.score?.halftime?.home === null || match.score?.halftime?.home === undefined;
+                            const needsExtraData = associatedPicks.some(p => {
+                                const mName = `${p.market_name || ''} ${p.odd_name || ''} ${p.odd_id || ''}`.toLowerCase();
+                                const isHalfPick = mName.includes('half') || mName.includes('ht/ft') || mName.includes('market_6') || mName.includes('market_9') || mName.includes('market_13');
+                                const isCornerPick = mName.includes('corner') && (mName.includes('1st half') || mName.includes('first half') || mName.includes('2nd half') || mName.includes('second half') || !match.statistics || match.statistics.length < 2);
+                                return isCornerPick || (htMissing && isHalfPick);
                             });
 
                             let extraCornerData = null;
-                            if (needsExtraCorners) {
+                            if (needsExtraData) {
                                 extraCornerData = await fetchSofaHalfCorners(match.teams?.home?.name, match.teams?.away?.name);
                             }
 

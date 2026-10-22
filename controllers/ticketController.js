@@ -109,7 +109,7 @@ const resolveCanonicalSelection = (matchInfo, item) => {
             const generatedOddId = buildOddId(marketRef, standardOpt, matchInfo.id);
 
             if (generatedOddId === targetOddId) {
-                bestCandidate = { market: bet, outcome: outcome };
+                bestCandidate = { market: bet, outcome: outcome, resolvedBetId: betId };
                 break;
             }
         }
@@ -120,14 +120,14 @@ const resolveCanonicalSelection = (matchInfo, item) => {
         return null; 
     }
 
-    const { market, outcome } = bestCandidate;
+    const { market, outcome, resolvedBetId } = bestCandidate;
 
     return {
         fixture_id: item.fixture_id,
         odd_id: item.odd_id,
         odd_value: Number(outcome.price || outcome.odd).toFixed(2), 
         odd_name: asText(item.odd_name), 
-        market_id: String(market.id || ''),
+        market_id: String(market.id || resolvedBetId || ''),
         market_key: String(market.key || market.name || ''),
         market_name: asText(item.market_name || market.name || market.title || "Match Market"), 
         league_name: item.league_name || matchInfo.league_name || matchInfo.league || null,
@@ -1355,14 +1355,14 @@ const CUSTOM_MARKET_MAP = {
     "3": "2nd Half Result",
     "4": "Asian Handicap", "handicap": "European Handicap",
     "5": "Total Goals", "totals": "Total Goals", "50": "Total Goals",
-    "6": "1st Half Total Goals",
+    "6": "1st Half Total Goals", "totals_h1": "1st Half Total Goals", "1st_half_total": "1st Half Total Goals",
     "7": "Halftime/Fulltime",
     "8": "Both Teams To Score", "btts": "Both Teams To Score",
-    "9": "2nd Half Total Goals",
+    "9": "2nd Half Total Goals", "totals_h2": "2nd Half Total Goals", "2nd_half_total": "2nd Half Total Goals",
     "10": "Correct Score", "31": "Correct Score",
     "11": "Highest Scoring Half",
     "12": "Double Chance", "dc": "Double Chance", "double_chance": "Double Chance",
-    "13": "1st Half Result",
+    "13": "1st Half Result", "h2h_h1": "1st Half Result",
     "14": "First Goal",
     "15": "Last Goal",
     "16": "Home Total Goals",
@@ -1403,6 +1403,38 @@ const CUSTOM_MARKET_MAP = {
     "349": "Goal Range"
 };
 
+const is1stHalfTotalMarket = (mId, mLower) => {
+    if (mLower.includes('corner') || mLower.includes('card')) return false;
+    if (mId === '6' || mId === 'totals_h1' || mId === '1st_half_total') return true;
+    const has1stHalf =
+        mLower.includes('1st half') ||
+        mLower.includes('first half') ||
+        mLower.includes('1h ') ||
+        mLower.includes('half time') ||
+        mLower.includes('halftime');
+    const hasTotalOrOU =
+        mLower.includes('total') ||
+        mLower.includes('over/under') ||
+        mLower.includes('goal line') ||
+        mLower.includes('goals over/under');
+    return has1stHalf && hasTotalOrOU;
+};
+
+const is2ndHalfTotalMarket = (mId, mLower) => {
+    if (mLower.includes('corner') || mLower.includes('card')) return false;
+    if (mId === '9' || mId === 'totals_h2' || mId === '2nd_half_total') return true;
+    const has2ndHalf =
+        mLower.includes('2nd half') ||
+        mLower.includes('second half') ||
+        mLower.includes('2h ');
+    const hasTotalOrOU =
+        mLower.includes('total') ||
+        mLower.includes('over/under') ||
+        mLower.includes('goal line') ||
+        mLower.includes('goals over/under');
+    return has2ndHalf && hasTotalOrOU;
+};
+
 const resolveMarketDetails = (item) => {
     const rawId = asText(item.market_id).toLowerCase();
     const rawKey = asText(item.market_key).toLowerCase();
@@ -1437,8 +1469,14 @@ const resolveMarketDetails = (item) => {
         }
     }
 
-    const mId = rawId || (CUSTOM_MARKET_MAP[oddPrefix] ? oddPrefix : '') || rawKey;
-    const mLower = `${canonicalMarket} ${marketName} ${mappedBase}`.trim().toLowerCase();
+    let mId = rawId || (CUSTOM_MARKET_MAP[oddPrefix] ? oddPrefix : '') || rawKey;
+    const mLower = `${canonicalMarket} ${marketName} ${mappedBase} ${rawKey} ${oddPrefix}`.trim().toLowerCase();
+
+    if (!mId) {
+        if (is1stHalfTotalMarket('', mLower)) mId = '6';
+        else if (is2ndHalfTotalMarket('', mLower)) mId = '9';
+    }
+
     return { mId, canonicalMarket, mLower };
 };
 
@@ -1572,6 +1610,7 @@ const fetchApiFootballFixture = async (fixtureId) => {
 
         const statusShort = f.fixture?.status?.short || '';
         const completed = ['FT', 'AET', 'PEN'].includes(statusShort);
+        const firstHalfCompleted = completed || ['HT', '2H', 'ET', 'BT', 'P'].includes(statusShort);
         const state = ['NS', 'TBD'].includes(statusShort) ? 'pre' : completed ? 'post' : 'in';
 
         const hScore = Number(f.score?.fulltime?.home ?? f.goals?.home ?? 0);
@@ -1608,6 +1647,7 @@ const fetchApiFootballFixture = async (fixtureId) => {
             awayScore: aScore,
             htHome,
             htAway,
+            firstHalfCompleted,
             homeCorners,
             awayCorners,
             htHomeCorners: null,
@@ -1692,7 +1732,16 @@ const buildMatchFromSofaEvent = async (ev) => {
 
         const fullEv = eventRes?.data?.event || ev;
         const statusType = String(fullEv.status?.type || '').toLowerCase();
+        const statusDesc = String(fullEv.status?.description || '').toLowerCase();
+        const statusCode = Number(fullEv.status?.code || 0);
         const completed = statusType === 'finished';
+        const firstHalfCompleted =
+            completed ||
+            statusCode === 31 ||
+            statusCode === 7 ||
+            statusDesc.includes('halftime') ||
+            statusDesc.includes('2nd half') ||
+            (fullEv.homeScore?.period2 !== undefined && fullEv.homeScore?.period2 !== null);
         const state = statusType === 'notstarted' ? 'pre' : completed ? 'post' : 'in';
 
         const hScoreObj = fullEv.homeScore || {};
@@ -1763,6 +1812,7 @@ const buildMatchFromSofaEvent = async (ev) => {
             awayScore: aScore,
             htHome,
             htAway,
+            firstHalfCompleted,
             homeCorners,
             awayCorners,
             htHomeCorners,
@@ -1957,6 +2007,14 @@ const fetchDetailedMatchStats = async (items, ticket) => {
 
                     const state = ev?.status?.type?.state;
                     const completed = ev?.status?.type?.completed === true || state === 'post';
+                    const periodNum = Number(ev?.status?.period || 0);
+                    const statusDetail = String(ev?.status?.type?.shortDetail || ev?.status?.type?.name || '').toLowerCase();
+                    const firstHalfCompleted =
+                        completed ||
+                        periodNum >= 2 ||
+                        statusDetail.includes('ht') ||
+                        statusDetail.includes('half') ||
+                        (Array.isArray(home.linescores) && home.linescores.length >= 2);
 
                     scoreMap[`${hName}_${aName}`] = {
                         eventId: ev.id,
@@ -1968,6 +2026,7 @@ const fetchDetailedMatchStats = async (items, ticket) => {
                         awayScore: aScore,
                         htHome,
                         htAway,
+                        firstHalfCompleted,
                         homeCorners,
                         awayCorners,
                         htHomeCorners: null,
@@ -2051,6 +2110,7 @@ const enrichMatchSummaryStats = async (matchObj) => {
                     matchObj.homeScore = matchObj.htHome + shH;
                     matchObj.awayScore = matchObj.htAway + shA;
                     matchObj.scoreStr = `${matchObj.homeScore}:${matchObj.awayScore}`;
+                    matchObj.firstHalfCompleted = true;
                 }
             }
 
@@ -2064,11 +2124,13 @@ const enrichMatchSummaryStats = async (matchObj) => {
                     if (d.clock?.value && d.clock.value > 120) {
                         minute = Math.ceil(Number(d.clock.value) / 60);
                     }
+                    const isFirstHalfEvent = d.period?.number === 1 || (!rawClock.includes('45+') && minute <= 45) || rawClock.startsWith('45+');
+                    const effectiveMinute = isFirstHalfEvent ? Math.min(45, minute) : Math.max(46, minute);
                     const scorerName = (d.participants?.[0]?.athlete?.displayName || d.athletesInvolved?.[0]?.displayName || d.text || '').toLowerCase();
                     const teamId = d.team?.id;
                     const side = String(teamId) === String(matchObj.homeTeamId) ? 'home' : String(teamId) === String(matchObj.awayTeamId) ? 'away' : null;
                     if (minute <= 95) {
-                        goalEvents.push({ minute, scorerName, side });
+                        goalEvents.push({ minute: effectiveMinute, scorerName, side });
                     }
                 }
             }
@@ -2077,6 +2139,10 @@ const enrichMatchSummaryStats = async (matchObj) => {
                 matchObj.scorers = goalEvents.map(g => g.scorerName).filter(Boolean);
                 matchObj.firstGoalTeam = goalEvents[0].side;
                 matchObj.lastGoalTeam = goalEvents[goalEvents.length - 1].side;
+                if (matchObj.htHome === null || matchObj.htAway === null) {
+                    matchObj.htHome = goalEvents.filter(g => g.side === 'home' && g.minute <= 45).length;
+                    matchObj.htAway = goalEvents.filter(g => g.side === 'away' && g.minute <= 45).length;
+                }
             }
         }
 
@@ -2118,6 +2184,7 @@ const mergeMatchStats = (primary, secondary) => {
         awayScore: primary.scoreStr !== '-:-' ? primary.awayScore : secondary.awayScore,
         scoreStr: primary.scoreStr !== '-:-' ? primary.scoreStr : secondary.scoreStr,
         completed: primary.completed || secondary.completed,
+        firstHalfCompleted: Boolean(primary.firstHalfCompleted || secondary.firstHalfCompleted || primary.completed || secondary.completed),
         htHome: primary.htHome ?? secondary.htHome,
         htAway: primary.htAway ?? secondary.htAway,
         homeCorners: primary.homeCorners ?? secondary.homeCorners,
@@ -2139,16 +2206,36 @@ const mergeMatchStats = (primary, secondary) => {
     };
 };
 
+const parseScorePairFromText = (rawText) => {
+    if (!rawText) return null;
+    const str = String(rawText);
+    const htMatch = str.match(/1H\s*(\d+)\s*[:\-]\s*(\d+)/i) || str.match(/HT\s*(\d+)\s*[:\-]\s*(\d+)/i);
+    const ftMatch = str.match(/FT\s*(\d+)\s*[:\-]\s*(\d+)/i) || str.match(/^(\d+)\s*[:\-]\s*(\d+)$/);
+    if (!htMatch && !ftMatch) return null;
+    return {
+        htHome: htMatch ? Number(htMatch[1]) : null,
+        htAway: htMatch ? Number(htMatch[2]) : null,
+        homeScore: ftMatch ? Number(ftMatch[1]) : (htMatch ? Number(htMatch[1]) : 0),
+        awayScore: ftMatch ? Number(ftMatch[2]) : (htMatch ? Number(htMatch[2]) : 0),
+        hasFT: Boolean(ftMatch),
+        hasHT: Boolean(htMatch)
+    };
+};
+
 const findMatchStatsForItem = async (item, ticket, scoreMap) => {
     const teams = String(item.match_info || '').split(/\s+vs\.?\s+|\s+-\s+/i);
     const homeTeam = (teams[0] || item.home_team || '').trim();
     const awayTeam = (teams[1] || item.away_team || '').trim();
-    const { mLower } = resolveMarketDetails(item);
+    const { mId, mLower } = resolveMarketDetails(item);
     const needsHalfCorners = mLower.includes('corner') && (mLower.includes('1st half') || mLower.includes('first half') || mLower.includes('2nd half') || mLower.includes('second half'));
+    const needsHalfScore =
+        ['3', '6', '7', '9', '11', '13', '22', '26', '32', '34', '35', '36', '37', '39'].includes(mId) ||
+        mLower.includes('half') ||
+        mLower.includes('ht/ft');
 
     let resultData = await fetchApiFootballFixture(item.fixture_id);
 
-    if ((!resultData || needsHalfCorners) && homeTeam && awayTeam) {
+    if ((!resultData || needsHalfCorners || (needsHalfScore && (resultData.htHome === null || resultData.htAway === null))) && homeTeam && awayTeam) {
         for (const [key, val] of Object.entries(scoreMap)) {
             if (key === '_sofaScheduleCache') continue;
             if (teamsMatch(homeTeam, val.homeName) && teamsMatch(awayTeam, val.awayName)) {
@@ -2164,7 +2251,7 @@ const findMatchStatsForItem = async (item, ticket, scoreMap) => {
         resultData.scoreStr === '-:-' ||
         (mLower.includes('corner') && (resultData.homeCorners === null || resultData.awayCorners === null)) ||
         (needsHalfCorners && (resultData.htHomeCorners === null || resultData.shHomeCorners === null)) ||
-        ((mLower.includes('half') || mLower.includes('ht/ft')) && (resultData.htHome === null || resultData.htAway === null));
+        (needsHalfScore && (resultData.htHome === null || resultData.htAway === null));
 
     if (missingCriticalStats && homeTeam && awayTeam) {
         const refTime = new Date(item.commence_time || ticket?.created_at || Date.now()).getTime();
@@ -2176,13 +2263,14 @@ const findMatchStatsForItem = async (item, ticket, scoreMap) => {
 
     if (resultData) return resultData;
 
-    if (item.score && item.score !== '-:-' && /^\d+\s*[:\-]\s*\d+$/.test(String(item.score).trim())) {
-        const parts = String(item.score).trim().split(/[:\-]/);
+    const parsedSavedScore = parseScorePairFromText(item.score);
+    if (parsedSavedScore) {
         return {
-            homeScore: Number(parts[0]),
-            awayScore: Number(parts[1]),
-            htHome: null,
-            htAway: null,
+            homeScore: parsedSavedScore.homeScore,
+            awayScore: parsedSavedScore.awayScore,
+            htHome: parsedSavedScore.htHome,
+            htAway: parsedSavedScore.htAway,
+            firstHalfCompleted: parsedSavedScore.hasHT || parsedSavedScore.hasFT,
             homeCorners: null,
             awayCorners: null,
             htHomeCorners: null,
@@ -2199,8 +2287,8 @@ const findMatchStatsForItem = async (item, ticket, scoreMap) => {
             lastGoalTeam: null,
             firstCornerTeam: null,
             lastCornerTeam: null,
-            scoreStr: `${Number(parts[0])}:${Number(parts[1])}`,
-            completed: true
+            scoreStr: `${parsedSavedScore.homeScore}:${parsedSavedScore.awayScore}`,
+            completed: parsedSavedScore.hasFT
         };
     }
 
@@ -2430,7 +2518,7 @@ const evaluateSingleLegAmharic = (item, matchData) => {
                 const cTotal = hC + aC;
                 const cornerScoreDisplay = `${shortHalf} ኮርነር ${hC}:${aC} (${cTotal})`;
 
-                if (!matchData.completed && !(is1stHalfCorner && matchData.htHome !== null)) {
+                if (!matchData.completed && !(is1stHalfCorner && matchData.firstHalfCompleted)) {
                     return {
                         item_id: item.id,
                         match_info: item.match_info,
@@ -2632,24 +2720,35 @@ const evaluateSingleLegAmharic = (item, matchData) => {
     const total = H + A;
     const scoreStr = `${H}:${A}`;
 
-    if (!matchData.completed) {
+    let htH = matchData.htHome;
+    let htA = matchData.htAway;
+    if ((htH === null || htA === null) && matchData.completed && H === 0 && A === 0) {
+        htH = 0;
+        htA = 0;
+    } else if ((htH === null || htA === null) && matchData.completed && Array.isArray(matchData.goalEvents) && matchData.goalEvents.length === total && total > 0) {
+        htH = matchData.goalEvents.filter(g => g.side === 'home' && g.minute <= 45).length;
+        htA = matchData.goalEvents.filter(g => g.side === 'away' && g.minute <= 45).length;
+    }
+
+    const is1stHalfTotal = is1stHalfTotalMarket(mId, mLower);
+    const is2ndHalfTotal = is2ndHalfTotalMarket(mId, mLower);
+    const is1stHalfOnlyMarket =
+        is1stHalfTotal ||
+        ['13', '22', '32', '34'].includes(mId) ||
+        mLower.includes('1st half result') ||
+        mLower.includes('first half winner') ||
+        mLower.includes('1st half double chance') ||
+        (mLower.includes('1st half') && mLower.includes('both teams')) ||
+        mLower.includes('1st half odd/even');
+
+    if (!matchData.completed && !(is1stHalfOnlyMarket && matchData.firstHalfCompleted && htH !== null && htA !== null)) {
         return {
             item_id: item.id,
             match_info: item.match_info,
-            liveScore: scoreStr,
+            liveScore: (htH !== null && htA !== null) ? `1H ${htH}:${htA} (Live ${scoreStr})` : scoreStr,
             aiStatus: 'pending',
-            explanationAmharic: `[${canonicalMarket}] ጨዋታው በመካሄድ ላይ ነው (አሁን ያለው ውጤት ${scoreStr})። የ90 ደቂቃ መጠናቀቅ ይጠበቃል።`
+            explanationAmharic: `[${canonicalMarket}] ጨዋታው በመካሄድ ላይ ነው (አሁን ያለው ውጤት ${scoreStr})።`
         };
-    }
-
-    let htH = matchData.htHome;
-    let htA = matchData.htAway;
-    if ((htH === null || htA === null) && H === 0 && A === 0) {
-        htH = 0;
-        htA = 0;
-    } else if ((htH === null || htA === null) && Array.isArray(matchData.goalEvents) && matchData.goalEvents.length === total) {
-        htH = matchData.goalEvents.filter(g => g.side === 'home' && g.minute <= 45).length;
-        htA = matchData.goalEvents.filter(g => g.side === 'away' && g.minute <= 45).length;
     }
 
     // 3. 10 ደቂቃ ውጤት (Market 54: 10 Minutes - 1X2)
@@ -2687,6 +2786,8 @@ const evaluateSingleLegAmharic = (item, matchData) => {
 
     // 4. የ1ኛ አጋማሽ፣ የ2ኛ አጋማሽ፣ HT/FT እና Highest Scoring Half ማርኬቶች
     const isHalfMarket =
+        is1stHalfTotal ||
+        is2ndHalfTotal ||
         ['3', '6', '7', '9', '11', '13', '22', '26', '32', '34', '35', '36', '37', '39'].includes(mId) ||
         mLower.includes('1st half') ||
         mLower.includes('first half') ||
@@ -2717,6 +2818,32 @@ const evaluateSingleLegAmharic = (item, matchData) => {
             }
         }
 
+        // የ1ኛ አጋማሽ ውጤት ባይመጣም እንኳ ከሙሉ ሰዓት (FT) ውጤት በሂሳብ ህግ መወሰን የሚችሉትን ወዲያውኑ መወሰን
+        if ((htH === null || htA === null) && matchData.completed && (is1stHalfTotal || is2ndHalfTotal)) {
+            const ftTarget = mLower.includes('home') ? H : mLower.includes('away') ? A : total;
+            const ouParsed = parseOULineAndDir(pickRaw);
+            if (ouParsed) {
+                if (ouParsed.dir === 'over' && ftTarget <= ouParsed.line) {
+                    return {
+                        item_id: item.id,
+                        match_info: item.match_info,
+                        liveScore: `FT ${scoreStr}`,
+                        aiStatus: 'lost',
+                        explanationAmharic: `[${canonicalMarket}] በሙሉው ጨዋታ የተቆጠረው ጎል (${ftTarget}) ከተመረጠው (${pickRaw}) ያነሰ ስለሆነ ተሸንፏል።`
+                    };
+                }
+                if (ouParsed.dir === 'under' && ftTarget < ouParsed.line) {
+                    return {
+                        item_id: item.id,
+                        match_info: item.match_info,
+                        liveScore: `FT ${scoreStr}`,
+                        aiStatus: 'won',
+                        explanationAmharic: `[${canonicalMarket}] በሙሉው ጨዋታ የተቆጠረው ጎል (${ftTarget}) ከተመረጠው (${pickRaw}) በታች ስለሆነ አሸንፏል።`
+                    };
+                }
+            }
+        }
+
         if (htH === null || htA === null) {
             return {
                 item_id: item.id,
@@ -2731,33 +2858,35 @@ const evaluateSingleLegAmharic = (item, matchData) => {
         const shH = Math.max(0, H - htH);
         const shA = Math.max(0, A - htA);
         const shTotal = shH + shA;
-        const halfScoreLabel = `1H ${htH}:${htA} / 2H ${shH}:${shA} (FT ${scoreStr})`;
+        const halfScoreLabel = matchData.completed
+            ? `1H ${htH}:${htA} / 2H ${shH}:${shA} (FT ${scoreStr})`
+            : `1H ${htH}:${htA} (Live ${scoreStr})`;
 
         let won = null;
-        if (mId === '6' || mLower.includes('1st half total') || mLower.includes('first half total')) {
+        if (is1stHalfTotal) {
             if (mLower.includes('home')) won = evaluateRangeOrExactPick(pickRaw, htH);
             else if (mLower.includes('away')) won = evaluateRangeOrExactPick(pickRaw, htA);
             else won = evaluateRangeOrExactPick(pickRaw, htTotal);
-        } else if (mId === '9' || mLower.includes('2nd half total') || mLower.includes('second half total')) {
+        } else if (is2ndHalfTotal) {
             if (mLower.includes('home')) won = evaluateRangeOrExactPick(pickRaw, shH);
             else if (mLower.includes('away')) won = evaluateRangeOrExactPick(pickRaw, shA);
             else won = evaluateRangeOrExactPick(pickRaw, shTotal);
-        } else if (mId === '13' || mLower.includes('1st half result') || mLower.includes('first half winner')) {
+        } else if (mId === '13' || mLower.includes('1st half result') || mLower.includes('first half winner') || mLower.includes('1st half - 1x2') || mLower.includes('1st half 1x2')) {
             won = eval1X2Pick(pickRaw, htH, htA, homeTeam, awayTeam);
-        } else if (mId === '3' || mLower.includes('2nd half result') || mLower.includes('second half winner')) {
+        } else if (mId === '3' || mLower.includes('2nd half result') || mLower.includes('second half winner') || mLower.includes('2nd half - 1x2') || mLower.includes('2nd half 1x2')) {
             won = eval1X2Pick(pickRaw, shH, shA, homeTeam, awayTeam);
-        } else if (mId === '32' || mLower.includes('1st half double chance')) {
+        } else if (mId === '32' || mLower.includes('1st half double chance') || mLower.includes('1st half - double chance')) {
             won = evalDCPick(pickRaw, htH, htA, homeTeam, awayTeam);
-        } else if (mLower.includes('2nd half double chance')) {
+        } else if (mLower.includes('2nd half double chance') || mLower.includes('2nd half - double chance')) {
             won = evalDCPick(pickRaw, shH, shA, homeTeam, awayTeam);
         } else if (mId === '34' || (mLower.includes('1st half') && mLower.includes('both teams'))) {
             won = evalBTTSPick(pickRaw, htH, htA);
         } else if (mId === '26' || (mLower.includes('2nd half') && mLower.includes('both teams'))) {
             won = evalBTTSPick(pickRaw, shH, shA);
-        } else if (mId === '22' || mLower.includes('1st half odd/even')) {
+        } else if (mId === '22' || (mLower.includes('1st half') && mLower.includes('odd/even'))) {
             if (pick.includes('odd')) won = htTotal % 2 === 1;
             else if (pick.includes('even')) won = htTotal % 2 === 0;
-        } else if (mLower.includes('2nd half odd/even')) {
+        } else if (mLower.includes('2nd half') && mLower.includes('odd/even')) {
             if (pick.includes('odd')) won = shTotal % 2 === 1;
             else if (pick.includes('even')) won = shTotal % 2 === 0;
         } else if (mId === '7' || mLower.includes('halftime/fulltime') || mLower.includes('ht/ft')) {
@@ -2796,6 +2925,10 @@ const evaluateSingleLegAmharic = (item, matchData) => {
             } else if (mLower.includes('away') || ['2', 'away'].includes(pick) || teamsMatch(pick, awayTeam)) {
                 won = ['no', 'ng'].includes(pick) ? !awayWinsEither : awayWinsEither;
             }
+        } else if (mLower.includes('1st half') || mLower.includes('first half')) {
+            won = evaluateRangeOrExactPick(pickRaw, htTotal) ?? eval1X2Pick(pickRaw, htH, htA, homeTeam, awayTeam) ?? evalDCPick(pickRaw, htH, htA, homeTeam, awayTeam);
+        } else if (mLower.includes('2nd half') || mLower.includes('second half')) {
+            won = evaluateRangeOrExactPick(pickRaw, shTotal) ?? eval1X2Pick(pickRaw, shH, shA, homeTeam, awayTeam) ?? evalDCPick(pickRaw, shH, shA, homeTeam, awayTeam);
         }
 
         if (won !== null) {
@@ -2804,7 +2937,7 @@ const evaluateSingleLegAmharic = (item, matchData) => {
                 match_info: item.match_info,
                 liveScore: halfScoreLabel,
                 aiStatus: won ? 'won' : 'lost',
-                explanationAmharic: `[${canonicalMarket}] 1ኛ አጋማሽ ${htH}:${htA}፣ 2ኛ አጋማሽ ${shH}:${shA} (ሙሉ ሰዓት ${scoreStr}) ተጠናቋል። ምርጫዎ (${pickRaw}) ${won ? 'አሸንፏል' : 'ተሸንፏል'}።`
+                explanationAmharic: `[${canonicalMarket}] 1ኛ አጋማሽ ${htH}:${htA} (ጠቅላላ ${htTotal} ጎል)፣ ሙሉ ሰዓት ${scoreStr} ተጠናቋል። ምርጫዎ (${pickRaw}) ${won ? 'አሸንፏል' : 'ተሸንፏል'}።`
             };
         }
     }
