@@ -181,7 +181,7 @@ const getTicketItems = async (connection, ticketId) => {
     return items;
 };
 
-// 🌟 የተስተካከለው የትኬት ውጤት እና Potential Win ስሌት (ትኬቱ Pending/Lost ሲሆን ወደ Stake እንዳይመለስ የሚጠብቅ) 🌟
+// 🌟 የተስተካከለው የትኬት ውጤት እና Potential Win ስሌት (በሁሉም ቦታ ወጥ የሆነ 2-digit rounding) 🌟
 const calculateTicketResult = (ticket, items) => {
     let lastMatchTime = new Date(ticket.created_at).getTime();
     let isLost = false;
@@ -226,8 +226,9 @@ const calculateTicketResult = (ticket, items) => {
     else if (isPending) status = 'pending';
 
     const stake = parseFloat(ticket.stake_amount) || 0;
-    const effectiveOdds = status === 'won' ? wonOdds : activeOdds;
-    let potentialWin = Number((effectiveOdds * stake).toFixed(2));
+    const rawEffectiveOdds = status === 'won' ? wonOdds : activeOdds;
+    const effectiveOdds = Math.round(rawEffectiveOdds * 100) / 100;
+    let potentialWin = Math.round((effectiveOdds * stake) * 100) / 100;
 
     // በዳታቤዝ ላይ ከዚህ በፊት የተቀመጠ ትክክለኛ potential_win ካለ እና items ባዶ ከሆኑ እሱን መጠበቅ
     const storedWin = parseFloat(ticket.potential_win) || 0;
@@ -237,6 +238,7 @@ const calculateTicketResult = (ticket, items) => {
 
     return {
         status,
+        totalOdds: effectiveOdds,
         potentialWin,
         lastMatchTime
     };
@@ -286,7 +288,7 @@ const placeTicket = async (req, res) => {
             [fixtureIds]
         );
 
-        let calculatedTotalOdds = 1;
+        let rawTotalOdds = 1;
         for (let item of selections) {
             const matchInfo = matches.find(m => String(m.id) === String(item.fixture_id));
             
@@ -304,13 +306,14 @@ const placeTicket = async (req, res) => {
             }
 
             item._canonical = canonicalSelection;
-            calculatedTotalOdds *= Number(canonicalSelection.odd_value);
+            rawTotalOdds *= Number(canonicalSelection.odd_value);
         }
 
-        calculatedTotalOdds = Math.round(calculatedTotalOdds * 100) / 100;
-        let calculatedPotentialWin = Math.round((calculatedTotalOdds * stake) * 100) / 100;
+        const calculatedTotalOdds = Math.round(rawTotalOdds * 100) / 100;
+        const calculatedPotentialWin = Math.round((calculatedTotalOdds * stake) * 100) / 100;
         
-        if (calculatedPotentialWin > MAX_WIN) {
+        // ለኦንላይን ተጫዋቾች ወዲያውኑ ከ10,000 በላይ ከሆነ ይከለክላል፤ ለ Guest Booking ግን ካሸር ጋር ሲደርስ የጨመረው ኦድ ታይቶ እንዲከለከል ወይም Stake እንዲቀንስ ይፈቅዳል
+        if (!isGuestBooking && calculatedPotentialWin > MAX_WIN) {
             return res.status(400).json({ success: false, message: `ከፍተኛው ማሸነፊያ ${MAX_WIN} ብር ብቻ ነው!` });
         }
 
@@ -361,17 +364,55 @@ const placeTicket = async (req, res) => {
     }
 };
 
+// 🌟 የተስተካከለው getBooking፡ ካሸሩ የቡኪንግ ኮዱን ሲፈልግ፣ የጨመረ ወይም የተቀየረ ኦድ ካለ ወዲያውኑ አዘምኖ ለካሸሩ ያሳያል! 🌟
 const getBooking = async (req, res) => {
     try {
         const [tickets] = await db.query('SELECT * FROM tickets WHERE booking_code = ?', [req.params.code.trim()]);
         if (tickets.length === 0) return res.status(404).json({ success: false, message: 'ይህ ቡኪንግ ኮድ አልተገኘም!' });
         const ticket = tickets[0];
         const items = await getTicketItems(db, ticket.id);
+
+        // ትኬቱ ገና ያልታተመ (pending) ከሆነ፣ የአሁኑን ወቅታዊ ኦድ ከ saved_matches አምጥቶ ማዘመን
+        if (!ticket.ticket_number && items.length > 0) {
+            const fixtureIds = items.map(i => i.fixture_id).filter(Boolean);
+            if (fixtureIds.length > 0) {
+                const [matches] = await db.query(
+                    'SELECT id, commence_time, odds_data, sport_key, home_team, away_team FROM saved_matches WHERE id IN (?)',
+                    [fixtureIds]
+                );
+                for (let item of items) {
+                    const matchInfo = matches.find(m => String(m.id) === String(item.fixture_id));
+                    if (matchInfo) {
+                        const canonical = resolveCanonicalSelection(matchInfo, item);
+                        if (canonical && Number(canonical.odd_value) > 0) {
+                            if (Number(item.odd_value) !== Number(canonical.odd_value)) {
+                                item.odd_changed = true;
+                                item.old_odd_value = item.odd_value;
+                            }
+                            item.odd_value = canonical.odd_value;
+                            await db.query('UPDATE ticket_items SET odd_value = ? WHERE id = ?', [canonical.odd_value, item.id]).catch(() => {});
+                        }
+                    }
+                }
+            }
+        }
+
         const calc = calculateTicketResult(ticket, items);
+
+        if (!ticket.ticket_number) {
+            ticket.total_odds = calc.totalOdds.toFixed(2);
+            ticket.potential_win = calc.potentialWin.toFixed(2);
+            await db.query(
+                'UPDATE tickets SET total_odds = ?, potential_win = ? WHERE id = ?',
+                [ticket.total_odds, ticket.potential_win, ticket.id]
+            ).catch(() => {});
+        }
+
         res.json({
             success: true,
             data: {
                 ...ticket,
+                total_odds: calc.totalOdds.toFixed(2),
                 potential_win: calc.potentialWin.toFixed(2),
                 selections: items
             }
@@ -480,9 +521,25 @@ const confirmBooking = async (req, res) => {
         recalculatedOdds = Math.round(recalculatedOdds * 100) / 100;
         let recalculatedWin = Math.round((recalculatedOdds * finalStake) * 100) / 100;
 
+        // 🌟 ኦድ ጨምሮ ከ 10,000 ብር ካለፈ፣ የተዘመነውን ኦድ በዳታቤዝ አስቀምጦ ለካሸሩ አዲሱን ኦድ እና ብር በመላክ መቆረጥ እንደማይችል ይነግረዋል 🌟
         if (recalculatedWin > MAX_WIN) {
-            await connection.rollback();
-            return res.status(400).json({ success: false, message: `ከፍተኛው ማሸነፊያ ${MAX_WIN} ብር ብቻ ነው!` });
+            await connection.query(
+                'UPDATE tickets SET stake_amount = ?, total_odds = ?, potential_win = ? WHERE id = ?',
+                [finalStake.toFixed(2), recalculatedOdds.toFixed(2), recalculatedWin.toFixed(2), ticket.id]
+            );
+            const updatedItems = await getTicketItems(connection, ticket.id);
+            await connection.commit();
+            return res.status(400).json({
+                success: false,
+                message: `ኦድ በመጨመሩ ምክንያት የሚያሸንፈው ብር (${recalculatedWin.toFixed(2)} ብር) ከ ${MAX_WIN} ብር ገደብ ስለበለጠ መቆረጥ አይችልም! እባክዎ የውርርድ መጠኑን (Stake) ወይም ጨዋታ ይቀንሱ።`,
+                updatedTicket: {
+                    ...ticket,
+                    stake_amount: finalStake.toFixed(2),
+                    total_odds: recalculatedOdds.toFixed(2),
+                    potential_win: recalculatedWin.toFixed(2),
+                    selections: updatedItems
+                }
+            });
         }
         
         const ticketNumber = await generateUniqueTicketNumber(connection);
@@ -914,7 +971,7 @@ const getCashierReport = async (req, res) => {
     let dateCondition = "DATE(created_at) = CURDATE()";
     let queryParams = [req.user.id];
 
-    if (filter === 'custom' && date && /^\d{4}-\d{2}-\d{2}$/.test(String(date).trim())) {
+    if ((filter === 'custom' || filter === 'date') && date && /^\d{4}-\d{2}-\d{2}$/.test(String(date).trim())) {
         dateCondition = "DATE(created_at) = ?";
         queryParams.push(String(date).trim());
     } else if (filter === 'week') {
@@ -1017,7 +1074,7 @@ const getCashierReport = async (req, res) => {
         res.json({ 
             success: true, 
             data: {
-                selected_date: filter === 'custom' ? date : null,
+                selected_date: (filter === 'custom' || filter === 'date') ? date : null,
                 total_tickets: totalTickets,
                 void_tickets: voidTickets,
                 service_fee_total: serviceFeeTotal,
@@ -1043,6 +1100,7 @@ const getCashierReport = async (req, res) => {
     }
 };
 
+// 🌟 የተስተካከለው getSummaryReport (ያለ 400 ገደብ እና ከቀን/custom ማጣሪያ ጋር) 🌟
 const getSummaryReport = async (req, res) => {
     if (req.user.role !== 'admin') return res.status(403).json({ success: false });
     const { filter, date } = req.query;
@@ -1050,7 +1108,8 @@ const getSummaryReport = async (req, res) => {
     let dateCondition = "DATE(t.created_at) = CURDATE()";
     let queryParams = [];
 
-    if (filter === 'custom' && date && /^\d{4}-\d{2}-\d{2}$/.test(String(date).trim())) {
+    // 'custom' ወይም 'date' ሲመጣ የተመረጠውን ቀን በትክክል እንዲያጣራ ተደርጓል
+    if ((filter === 'custom' || filter === 'date') && date && /^\d{4}-\d{2}-\d{2}$/.test(String(date).trim())) {
         dateCondition = "DATE(t.created_at) = ?";
         queryParams = [String(date).trim()];
     } else if (filter === 'week') {
@@ -1060,7 +1119,7 @@ const getSummaryReport = async (req, res) => {
     } else if (filter === 'year') {
         dateCondition = "YEAR(t.created_at) = YEAR(CURDATE())";
     } else if (filter === 'all') {
-        dateCondition = "1=1";
+        dateCondition = "1=1"; // ሳይቱ ስራ ከጀመረ ጀምሮ ያሉትን ሁሉንም ያመጣል
     }
 
     try {
@@ -1256,7 +1315,7 @@ const getSummaryReport = async (req, res) => {
         res.json({
             success: true,
             data: {
-                selectedDate: filter === 'custom' ? date : null,
+                selectedDate: (filter === 'custom' || filter === 'date') ? date : null,
                 totalTickets,
                 voidTickets,
                 shopTicketsCount,
@@ -1278,8 +1337,8 @@ const getSummaryReport = async (req, res) => {
                 activeOnlineUsers: Number(onlineUsersCount[0]?.count || 0),
                 onlineStats,
                 cashierStats,
-                winningTickets: winningTickets.slice(0, 150),
-                periodTickets: periodTickets.slice(0, 250)
+                winningTickets,
+                periodTickets
             }
         });
     } catch (error) {
@@ -1296,11 +1355,20 @@ const getStaffList = async (req, res) => {
     } catch (error) { res.status(500).json({ success: false }); }
 };
 
+// 🌟 የ 400 ትኬት ገደብ ተነስቷል — ሳይቱ ከጀመረ ጀምሮ ወይም በተመረጠው ቀን ያሉትን ሁሉንም ትኬቶች ያመጣል 🌟
 const getAllTickets = async (req, res) => {
     if (req.user.role !== 'admin') return res.status(403).json({ success: false, message: 'ያልተፈቀደ (Unauthorized)' });
     
     try {
         await reconcileActiveTicketsInDb();
+
+        const { date } = req.query;
+        let dateWhere = "";
+        let params = [];
+        if (date && /^\d{4}-\d{2}-\d{2}$/.test(String(date).trim())) {
+            dateWhere = "AND DATE(t.created_at) = ?";
+            params.push(String(date).trim());
+        }
 
         const [tickets] = await db.query(`
             SELECT t.*, u.username as cashier, u.role,
@@ -1308,9 +1376,9 @@ const getAllTickets = async (req, res) => {
             FROM tickets t 
             LEFT JOIN users u ON t.user_id = u.id 
             WHERE t.ticket_number IS NOT NULL
+              ${dateWhere}
             ORDER BY t.created_at DESC
-            LIMIT 400
-        `);
+        `, params);
         
         let formattedTickets = [];
         if (tickets.length > 0) {
