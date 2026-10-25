@@ -59,6 +59,7 @@ const createApiClient = (initialKeys, baseUrl) => {
     let currentKey = apiKeys[0];
     let headers = { 'x-apisports-key': currentKey };
     let requestsRemaining = Infinity;
+    let rateLimitRetries = 0; // ለደቂቃ ገደብ (Per-minute rate limit) መቆጣጠሪያ
 
     const rotate = async (reason = '', isInvalidKey = false) => {
         if (reason) console.log(`\n⚠️ API-Football Key ችግር (${reason}) — ወደሚቀጥለው Key በመቀየር ላይ...`);
@@ -68,6 +69,7 @@ const createApiClient = (initialKeys, baseUrl) => {
         currentKey = apiKeys[0];
         headers = { 'x-apisports-key': currentKey };
         requestsRemaining = Infinity;
+        rateLimitRetries = 0;
         return true;
     };
 
@@ -90,15 +92,27 @@ const createApiClient = (initialKeys, baseUrl) => {
                 if (!rotated) break;
             }
             try {
-                const resp = await axios.get(`${baseUrl}${path}`, { headers, params, timeout: 12000 });
+                const resp = await axios.get(`${baseUrl}${path}`, { headers, params, timeout: 15000 });
                 await trackUsage(resp.headers);
 
                 // API-Football 200 OK መልሶ በውስጡ errors ካለው ማጣራት
                 const apiErrors = resp.data && resp.data.errors;
                 if (apiErrors && typeof apiErrors === 'object' && Object.keys(apiErrors).length > 0) {
                     const errMsg = Object.values(apiErrors).join(' | ');
-                    const isInvalidToken = Boolean(apiErrors.token || errMsg.toLowerCase().includes('application key'));
-                    if (isInvalidToken || apiErrors.requests || apiErrors.access || errMsg.toLowerCase().includes('limit') || errMsg.toLowerCase().includes('key')) {
+                    const errLower = errMsg.toLowerCase();
+
+                    // 🌟 1. የደቂቃ ገደብ (Minute Rate Limit) ከሆነ Key አይቀይርም! 6.5 ሰከንድ ጠብቆ ይደግማል
+                    if (apiErrors.rateLimit || errLower.includes('per minute') || errLower.includes('too many requests')) {
+                        if (rateLimitRetries < 2) {
+                            rateLimitRetries++;
+                            console.log(`⏳ የደቂቃ ገደብ ደርሷል (${path}) — 6.5 ሰከንድ በመጠበቅ ላይ...`);
+                            await delay(6500);
+                            continue;
+                        }
+                    }
+
+                    const isInvalidToken = Boolean(apiErrors.token || errLower.includes('application key'));
+                    if (isInvalidToken || apiErrors.requests || apiErrors.access || errLower.includes('limit') || errLower.includes('key')) {
                         const rotated = await rotate(errMsg, isInvalidToken);
                         if (!rotated) {
                             console.error(`❌ ሁሉም API-Football Keys የዛሬ ኮታቸው አልቋል ወይም ትክክል አይደሉም: ${errMsg}`);
@@ -109,9 +123,19 @@ const createApiClient = (initialKeys, baseUrl) => {
                     console.warn(`⚠️ API-Football ማስጠንቀቂያ (${path}): ${errMsg}`);
                 }
 
+                rateLimitRetries = 0;
                 return resp;
             } catch (err) {
                 const status = err.response && err.response.status;
+
+                // 🌟 2. HTTP 429 ሲመጣ የቀን ኮታው ካላለቀ መጀመሪያ ጠብቆ እንዲሞክር ማድረግ
+                if (status === 429 && requestsRemaining > 2 && rateLimitRetries < 2) {
+                    rateLimitRetries++;
+                    console.log(`⏳ HTTP 429 (Rate Limit) on ${path} — 6.5 ሰከንድ ጠብቆ በድጋሚ በመሞከር ላይ...`);
+                    await delay(6500);
+                    continue;
+                }
+
                 if (status === 429 || status === 403 || status === 401) {
                     const rotated = await rotate(`HTTP ${status} on ${path}`, status === 401);
                     if (!rotated) throw err; 
@@ -263,13 +287,17 @@ const fetchAndSaveMatches = async () => {
         let totalWithOdds = 0;
 
         const apiKeys = await getApiKeysArray();
-        if (apiKeys.length === 0) return false;
+        if (apiKeys.length === 0) {
+            console.warn('⚠️ ምንም API-Football Key አልተገኘም!');
+            return false;
+        }
 
         const BASE_URL = 'https://v3.football.api-sports.io';
         const client = createApiClient(apiKeys, BASE_URL);
 
+        // 🌟 ከ 30 ቀን ይልቅ ለሚቀጥሉት 5 ቀናት ብቻ መጠየቅ (የ API ኮታን በ85% ይቆጥባል!)
         const targetDates = [];
-        for (let i = 0; i < 30; i++) {
+        for (let i = 0; i < 5; i++) {
             const d = new Date();
             d.setDate(d.getDate() + i);
             targetDates.push({ dateStr: d.toISOString().split('T')[0], dayOffset: i });
@@ -286,6 +314,8 @@ const fetchAndSaveMatches = async () => {
 
             try {
                 const fixResp = await client.get('/fixtures', { date: dateStr });
+                await delay(1500); // 🌟 በደቂቃ ገደብ (429) እንዳይመታ 1.5 ሰከንድ መጠበቅ
+
                 const apiErrs = fixResp?.data?.errors;
                 if (apiErrs && apiErrs.plan) {
                     console.log(`ℹ️ የ API Plan ገደብ (${dateStr}): ${apiErrs.plan}`);
@@ -303,7 +333,7 @@ const fetchAndSaveMatches = async () => {
                 for (const bookieId of targetBookies) {
                     if (oddsMap.size >= validFixtures.length) break; 
                     let page = 1, totalPages = 1;
-                    while (page <= totalPages) {
+                    while (page <= totalPages && page <= 5) {
                         if (client.remaining() <= 2) {
                             const rotated = await client.rotate('Quota low during odds pagination');
                             if (!rotated) break;
@@ -318,26 +348,32 @@ const fetchAndSaveMatches = async () => {
                             });
                             totalPages = oddsResp?.data?.paging?.total || 1;
                             page++;
-                            await delay(250);
-                        } catch (e) { page++; await delay(800); }
+                            await delay(1500); // 🌟 ከ 250ms ወደ 1500ms ተቀይሯል (429 ለመከላከል)
+                        } catch (e) { page++; await delay(2000); }
                     }
                 }
 
-                const missingTopFixtures = validFixtures.filter(f => topLeagueIds.includes(f.league.id)).filter(f => !oddsMap.has(f.fixture.id));
-                for (const missingFix of missingTopFixtures) {
-                    if (client.remaining() <= 2) {
-                        const rotated = await client.rotate('Quota low during top fixtures odds');
-                        if (!rotated) break;
-                    }
-                    try {
-                        const oddsResp = await client.get('/odds', { fixture: missingFix.fixture.id });
-                        const oddData = oddsResp?.data?.response?.[0];
-                        if (oddData && oddData.bookmakers?.length > 0) {
-                            const bestBm = oddData.bookmakers.find(b => b.id === 8) || oddData.bookmakers.find(b => b.id === 11) || oddData.bookmakers[0];
-                            oddsMap.set(missingFix.fixture.id, bestBm);
+                if (dayOffset <= 2) {
+                    const missingTopFixtures = validFixtures
+                        .filter(f => topLeagueIds.includes(f.league.id))
+                        .filter(f => !oddsMap.has(f.fixture.id))
+                        .slice(0, 15);
+
+                    for (const missingFix of missingTopFixtures) {
+                        if (client.remaining() <= 2) {
+                            const rotated = await client.rotate('Quota low during top fixtures odds');
+                            if (!rotated) break;
                         }
-                        await delay(300);
-                    } catch (e) { await delay(800); }
+                        try {
+                            const oddsResp = await client.get('/odds', { fixture: missingFix.fixture.id });
+                            const oddData = oddsResp?.data?.response?.[0];
+                            if (oddData && oddData.bookmakers?.length > 0) {
+                                const bestBm = oddData.bookmakers.find(b => b.id === 8) || oddData.bookmakers.find(b => b.id === 11) || oddData.bookmakers[0];
+                                oddsMap.set(missingFix.fixture.id, bestBm);
+                            }
+                            await delay(1500);
+                        } catch (e) { await delay(2000); }
+                    }
                 }
 
                 for (const [fixtureId, bookmakerData] of oddsMap.entries()) {
@@ -1032,7 +1068,7 @@ const evaluateMarketPickWithScore = (pick, match, extraCornerData = null) => {
 
     // =========================================================================
     // 🛡️ 7. ልዩ ማርኬቶች (Exact Goals [38], Draw No Bet [2], Win Either/Both Halves [36, 37],
-    //       Highest Scoring Half [11], Which Team To Score [62], Score in Both Halves [39], Both Halves Over 1.5 [35])
+    //        Highest Scoring Half [11], Which Team To Score [62], Score in Both Halves [39], Both Halves Over 1.5 [35])
     // =========================================================================
     if (marketId === 38 || mCombined.includes('exact goals')) {
         const egPeriod = getPeriodGoals(mCombined);
@@ -1540,8 +1576,15 @@ let settlementIntervalId = null;
 const startCronJobs = () => {
     initializeDatabase();
 
-    // ሰርቨሩ እንደተነሳ በ5 ሰከንድ ውስጥ የመጀመሪያውን የውጤት ማጣሪያ ያካሂዳል
-    setTimeout(() => {
+    // 🌟 ሰርቨሩ እንደተነሳ በ5 ሰከንድ ውስጥ ዳታቤዙ ባዶ ከሆነ ጨዋታዎችን ያመጣል፣ በመቀጠል የውጤት ማጣሪያ ያካሂዳል
+    setTimeout(async () => {
+        try {
+            const [upcoming] = await db.query('SELECT COUNT(*) as cnt FROM saved_matches WHERE commence_time > UTC_TIMESTAMP()');
+            if ((upcoming[0]?.cnt || 0) === 0) {
+                console.log('⚡ በዳታቤዝ ውስጥ ቀጣይ ጨዋታዎች ስላልተገኙ አውቶማቲክ Sync ተጀምሯል...');
+                await fetchAndSaveMatches();
+            }
+        } catch (e) {}
         runAutoSettlement().catch(() => {});
     }, 5000);
 
